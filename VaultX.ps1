@@ -457,8 +457,23 @@ function Read-MenuKey {
         if ($state -match "AltPressed") { $mods = $mods -bor [ConsoleModifiers]::Alt }
         if ($state -match "CtrlPressed") { $mods = $mods -bor [ConsoleModifiers]::Control }
     }
+    $keyValue = $null
+    if ($raw.PSObject.Properties.Match("Key").Count -gt 0) {
+        $keyValue = $raw.Key
+    } elseif ($raw.PSObject.Properties.Match("VirtualKeyCode").Count -gt 0) {
+        try {
+            $keyValue = [ConsoleKey]$raw.VirtualKeyCode
+        } catch {
+            $keyValue = $null
+        }
+    } elseif ($raw.PSObject.Properties.Match("Character").Count -gt 0) {
+        if ($raw.Character -ne [char]0) {
+            $keyValue = $raw.Character.ToString().ToUpperInvariant()
+        }
+    }
+    $keyText = if ($null -eq $keyValue -or [string]::IsNullOrEmpty($keyValue.ToString())) { "Unknown" } else { $keyValue.ToString() }
     return [pscustomobject]@{
-        Key = $raw.Key.ToString()
+        Key = $keyText
         Modifiers = $mods
     }
 }
@@ -479,7 +494,7 @@ function Set-CursorVisible {
     }
 }
 
-function Try-SetClipboard {
+function Set-ClipboardSafe {
     param([string]$Value)
     $cmd = Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue
     if ($null -eq $cmd) { return $false }
@@ -1158,7 +1173,7 @@ function Show-EntryDetail {
                         if ([string]::IsNullOrEmpty($value)) {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
                         } else {
-                            if (Try-SetClipboard -Value $value) {
+                            if (Set-ClipboardSafe -Value $value) {
                                 Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
