@@ -17,7 +17,7 @@ $script:MenuHighlightColor = [ConsoleColor]::Cyan
 $script:MenuDisabledColor = [ConsoleColor]::DarkGray
 $script:MenuSeparatorColor = [ConsoleColor]::DarkGray
 $script:MenuPromptColor = [ConsoleColor]::Gray
-$script:MenuPointerSymbol = "❯"
+$script:MenuPointerSymbol = ">"
 
 function Convert-SecureStringToPlain {
     param([Security.SecureString]$Secure)
@@ -340,51 +340,14 @@ function Test-VaultMeta {
 }
 
 function Write-Banner {
-    $v = @(
-        "\     /",
-        " \   / ",
-        "  \ /  ",
-        "   \/  ",
-        "       "
+    $lines = @(
+        "██╗   ██╗ █████╗ ██╗   ██╗██╗   ██╗████████╗██╗  ██╗",
+        "██║   ██║██╔══██╗██║   ██║██║   ██║╚══██╔══╝╚██╗██╔╝",
+        "██║   ██║███████║██║   ██║██║   ██║   ██║    ╚███╔╝ ",
+        "╚██╗ ██╔╝██╔══██║██║   ██║██║   ██║   ██║    ██╔██╗ ",
+        " ╚████╔╝ ██║  ██║╚██████╔╝╚██████╔╝   ██║   ██╔╝ ██╗",
+        "  ╚═══╝  ╚═╝  ╚═╝ ╚═════╝  ╚═════╝    ╚═╝   ╚═╝  ╚═╝"
     )
-    $a = @(
-        "   /\  ",
-        "  /  \ ",
-        " /____\",
-        "/      \",
-        "/      \"
-    )
-    $u = @(
-        "\     /",
-        "\     /",
-        "\     /",
-        "\     /",
-        " \___/ "
-    )
-    $l = @(
-        "/      ",
-        "/      ",
-        "/      ",
-        "/      ",
-        "/______"
-    )
-    $t = @(
-        "-------",
-        "   /   ",
-        "   /   ",
-        "   /   ",
-        "   /   "
-    )
-    $x = @(
-        "\     /",
-        " \   / ",
-        "  \ /  ",
-        "  / \  ",
-        " /   \ "
-    )
-    $lines = for ($i = 0; $i -lt $v.Count; $i++) {
-        ($v[$i], $a[$i], $u[$i], $l[$i], $t[$i], "", $x[$i]) -join "  "
-    }
     foreach ($line in $lines) {
         Write-Host $line -ForegroundColor Cyan
     }
@@ -402,7 +365,12 @@ function Write-Header {
         "{0} v{1}" -f $script:AppName, $script:AppVersion
     }
     Write-Host $greeting -ForegroundColor DarkGray
-    Write-Host $titleLine -ForegroundColor Cyan
+    if ($ShowBanner) {
+        Write-Banner
+        Write-Host $titleLine -ForegroundColor DarkGray
+    } else {
+        Write-Host $titleLine -ForegroundColor Cyan
+    }
     if ($Subtitle) {
         Write-Host $Subtitle -ForegroundColor Gray
     }
@@ -503,6 +471,37 @@ function Set-ClipboardSafe {
         return $true
     } catch {
         return $false
+    }
+}
+
+function Normalize-WebUrl {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
+    $trimmed = $Url.Trim()
+    if ($trimmed -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
+        $trimmed = "https://$trimmed"
+    }
+    $uri = $null
+    if ([Uri]::TryCreate($trimmed, [UriKind]::Absolute, [ref]$uri)) {
+        if ($uri.Scheme -in @("http", "https")) {
+            return $uri.AbsoluteUri
+        }
+    }
+    return $null
+}
+
+function Open-WebUrl {
+    param([string]$Url)
+    $normalized = Normalize-WebUrl -Url $Url
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+        Show-Message "URL is empty or invalid." ([ConsoleColor]::Yellow)
+        return
+    }
+    try {
+        Start-Process -FilePath $normalized | Out-Null
+        Show-Message "Opening URL..." ([ConsoleColor]::Green)
+    } catch {
+        Show-Message "Unable to open URL on this system." ([ConsoleColor]::Red)
     }
 }
 
@@ -1138,6 +1137,7 @@ function Show-EntryDetail {
     foreach ($field in $fields) {
         $items += @{ Type = "field"; Field = $field }
     }
+    $items += @{ Type = "action"; Label = "Open URL"; Enabled = (-not [string]::IsNullOrWhiteSpace($Entry.Url)) }
     $items += @{ Type = "action"; Label = "Edit entry" }
     $items += @{ Type = "action"; Label = "Back" }
     $selected = 0
@@ -1150,15 +1150,23 @@ function Show-EntryDetail {
             $labelWidth = 12
             for ($i = 0; $i -lt $items.Count; $i++) {
                 $item = $items[$i]
+                $isActive = $true
                 if ($item.Type -eq "field") {
                     $display = Format-DisplayValue $item.Field.Display 60
                     $line = ("{0,-$labelWidth} : {1}" -f $item.Field.Label, $display)
                 } else {
+                    if ($item.PSObject.Properties.Match("Enabled").Count -gt 0 -and -not $item.Enabled) {
+                        $isActive = $false
+                    }
                     $line = "[Action] " + $item.Label
                 }
                 $isSelected = ($i -eq $selected)
-                $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $line -IsSelected $isSelected -Color $color
+                if ($isActive) {
+                    $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
+                } else {
+                    $color = $script:MenuDisabledColor
+                }
+                Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$isActive -Color $color
             }
             Write-Host ""
             Write-Host "Enter copies field or runs action, Esc to back." -ForegroundColor DarkGray
@@ -1178,6 +1186,12 @@ function Show-EntryDetail {
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
+                        }
+                    } elseif ($item.Label -eq "Open URL") {
+                        if ($item.PSObject.Properties.Match("Enabled").Count -gt 0 -and -not $item.Enabled) {
+                            Show-Message "No URL available to open." ([ConsoleColor]::Yellow)
+                        } else {
+                            Open-WebUrl -Url $Entry.Url
                         }
                     } elseif ($item.Label -eq "Edit entry") {
                         return "edit"
