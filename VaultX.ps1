@@ -622,6 +622,32 @@ function Format-MenuText {
     return ($Text.Substring(0, $Max - 3) + "...")
 }
 
+function Get-MenuBlockWidth {
+    param(
+        [string[]]$Items,
+        [int]$MinWidth = 10,
+        [int]$MaxWidth = 60
+    )
+    if ($null -eq $Items -or $Items.Count -eq 0) { return $MinWidth }
+    $maxLen = ($Items | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    $width = [Math]::Max($MinWidth, [Math]::Min($MaxWidth, $maxLen + 2))
+    return $width
+}
+
+function Start-MenuFrame {
+    param([ref]$IsFirstRender)
+    if ($IsFirstRender.Value) {
+        Clear-Host
+        $IsFirstRender.Value = $false
+        return
+    }
+    try {
+        [Console]::SetCursorPosition(0, 0)
+    } catch {
+        Clear-Host
+    }
+}
+
 function Write-MenuItem {
     param(
         [string]$Text,
@@ -630,7 +656,8 @@ function Write-MenuItem {
         [ConsoleColor]$Color = [ConsoleColor]::Gray,
         [int]$Indent = 2,
         [ValidateSet("Left", "Center")]
-        [string]$Align = "Left"
+        [string]$Align = "Left",
+        [int]$BlockWidth = 0
     )
     $maxWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent + 4))
     $safeText = Format-MenuText -Text $Text -Max $maxWidth
@@ -640,6 +667,16 @@ function Write-MenuItem {
         $line = $prefix + $safeText
         $width = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
         $padding = [Math]::Max(0, [Math]::Floor(($width - $line.Length) / 2))
+        if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
+        Write-Host ((" " * $padding) + $line) -ForegroundColor $Color
+        return
+    }
+    if ($BlockWidth -gt 0) {
+        $prefix = if ($IsSelected) { "$script:MenuPointerSymbol " } else { "  " }
+        $line = $prefix + $safeText
+        $width = [Math]::Max($BlockWidth, $line.Length)
+        $screenWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
+        $padding = [Math]::Max(0, [Math]::Floor(($screenWidth - $width) / 2))
         if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
         Write-Host ((" " * $padding) + $line) -ForegroundColor $Color
         return
@@ -668,8 +705,9 @@ function Show-ActionMenu {
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
+        $isFirstRender = $true
         while ($true) {
-            Clear-Host
+            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header $Title
             if ($Subtitle) {
                 Write-Host $Subtitle -ForegroundColor DarkGray
@@ -891,6 +929,7 @@ function Show-EntryList {
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
+        $isFirstRender = $true
         while ($true) {
         $filterResult = Get-FilteredEntries -Entries $Entries -SearchTerm $SearchTerm
         $filtered = $filterResult.Entries
@@ -913,7 +952,7 @@ function Show-EntryList {
         if ($visibleActions.Count -eq 0) { $visibleActions = @(@{ Label = "Logout"; Action = "logout" }) }
         $actionSelected = [Math]::Max(0, [Math]::Min($actionSelected, $visibleActions.Count - 1))
 
-        Clear-Host
+        Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
         $subtitle = "Vault entries"
         if ($AccountName) { $subtitle = "Vault entries - $AccountName" }
         Write-Header $subtitle -ShowBanner
@@ -1079,6 +1118,7 @@ function Show-AccountMenu {
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
+        $isFirstRender = $true
         while ($true) {
             $visibleActions = @()
             foreach ($action in $actions) {
@@ -1086,18 +1126,19 @@ function Show-AccountMenu {
                 $visibleActions += $action
             }
             $actionSelected = [Math]::Max(0, [Math]::Min($actionSelected, $visibleActions.Count - 1))
-            Clear-Host
+            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header "Main Menu" -ShowBanner
             Write-MenuPrompt "VaultX Main Menu: What would you like to do?"
             if ($Accounts.Count -eq 0) {
                 Write-Host "No accounts yet." -ForegroundColor DarkGray
             } else {
                 Write-Host "Accounts" -ForegroundColor DarkGray
+                $accountWidth = Get-MenuBlockWidth -Items @($Accounts | ForEach-Object { $_.Name }) -MaxWidth 40
                 for ($i = 0; $i -lt $Accounts.Count; $i++) {
                     $account = $Accounts[$i]
                     $isSelected = ($focus -eq "accounts" -and $i -eq $Selected)
                     $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                    Write-MenuItem -Text $account.Name -IsSelected $isSelected -Color $color -Align "Center"
+                    Write-MenuItem -Text $account.Name -IsSelected $isSelected -Color $color -BlockWidth $accountWidth
                 }
             }
             Write-Host ""
@@ -1106,11 +1147,12 @@ function Show-AccountMenu {
                 Write-Host ("Selected: " + $Accounts[$Selected].Name) -ForegroundColor DarkGray
             }
             Write-MenuSeparator
+            $actionWidth = Get-MenuBlockWidth -Items @($visibleActions | ForEach-Object { $_.Label }) -MaxWidth 28
             for ($i = 0; $i -lt $visibleActions.Count; $i++) {
                 $action = $visibleActions[$i]
                 $isSelected = ($focus -eq "actions" -and $i -eq $actionSelected)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Align "Center"
+                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -BlockWidth $actionWidth
             }
             Write-Host ""
             Write-Host "Arrows: Up/Down move, Enter select, Esc/Q quit." -ForegroundColor DarkGray
@@ -1180,8 +1222,9 @@ function Show-EntryDetail {
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
+        $isFirstRender = $true
         while ($true) {
-            Clear-Host
+            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header ("Entry: " + $Entry.Title)
             $labelWidth = 12
             for ($i = 0; $i -lt $items.Count; $i++) {
