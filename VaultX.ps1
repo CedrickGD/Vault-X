@@ -18,6 +18,7 @@ $script:MenuDisabledColor = [ConsoleColor]::DarkGray
 $script:MenuSeparatorColor = [ConsoleColor]::DarkGray
 $script:MenuPromptColor = [ConsoleColor]::Gray
 $script:MenuPointerSymbol = ">"
+$script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
 
 function Convert-SecureStringToPlain {
     param([Security.SecureString]$Secure)
@@ -50,6 +51,32 @@ function New-RandomBytes {
 
 function Get-AppDir {
     return (Join-Path $env:LOCALAPPDATA $script:AppName)
+}
+
+function Get-LogPath {
+    return (Join-Path (Get-AppDir) "vaultx.log")
+}
+
+function Write-Log {
+    param([string]$Message)
+    try {
+        $path = Get-LogPath
+        $dir = Split-Path -Parent $path
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir | Out-Null
+        }
+        $stamp = (Get-Date).ToString("s")
+        Add-Content -Path $path -Value ("[{0}] {1}" -f $stamp, $Message) -Encoding UTF8
+    } catch {
+    }
+}
+
+function Wait-ForExit {
+    param([string]$Prompt = "Press Enter to close VaultX.")
+    try {
+        [void](Read-Host $Prompt)
+    } catch {
+    }
 }
 
 function Get-AccountsPath {
@@ -348,11 +375,15 @@ ____   _________   ____ ___.____  ___________ ____  ___
    \___/\____|__  /______/ |_______ \____|    /___/\  \
                 \/                 \/               \_/
 '@
-    $lines = $banner -split "\r?\n"
-    foreach ($line in $lines) {
-        if ($line -ne "") {
-            Write-Host $line -ForegroundColor Cyan
+    try {
+        $lines = $banner -split "\r?\n"
+        foreach ($line in $lines) {
+            if ($line -ne "") {
+                Write-Host $line -ForegroundColor Cyan
+            }
         }
+    } catch {
+        Write-Log ("Banner render failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -1396,6 +1427,7 @@ function Invoke-VaultX {
     $selectedAccount = 0
 
     try {
+        Write-Log "VaultX started."
         Register-VaultXSession
         while ($true) {
             $menu = Show-AccountMenu -Accounts $accounts -Selected $selectedAccount
@@ -1430,6 +1462,7 @@ function Invoke-VaultX {
         }
     } finally {
         Clear-VaultSession
+        Write-Log "VaultX session closed."
     }
 }
 
@@ -1448,7 +1481,13 @@ if (-not $script:IsDotSourced) {
         Invoke-VaultX
     } catch {
         Show-Message "VaultX hit an unexpected error." ([ConsoleColor]::Red)
+        Write-Log ("Unhandled error: {0}" -f $_.Exception.Message)
+        Write-Log ($_.Exception | Out-String)
+        Wait-ForExit -Prompt "Press Enter to close VaultX."
     } finally {
         Close-VaultX
+        if ($script:WaitOnExit) {
+            Wait-ForExit -Prompt "Press Enter to close VaultX."
+        }
     }
 }
