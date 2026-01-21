@@ -5,6 +5,7 @@ VaultX - simple local password manager (single-user, local encryption)
 [CmdletBinding()]
 param(
     [switch]$Close,
+    [switch]$Quit,
     [switch]$Help
 )
 
@@ -433,11 +434,13 @@ function Show-Usage {
     Write-Host "Usage:" -ForegroundColor Gray
     Write-Host "  VaultX.ps1             # Launch the app" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Close       # Close the app session" -ForegroundColor Gray
+    Write-Host "  VaultX.ps1 -Quit        # Quit the app session" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Help        # Show this help" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Session shortcuts (after first run):" -ForegroundColor Gray
     Write-Host "  VaultX                 # Launch again in the same session" -ForegroundColor Gray
     Write-Host "  Close-VaultX           # Close the app session" -ForegroundColor Gray
+    Write-Host "  Quit-VaultX            # Quit the app session" -ForegroundColor Gray
 }
 
 function Show-Message {
@@ -870,7 +873,7 @@ function Show-EntryList {
         "VaultX entry menu:",
         "  Up/Down  - move selection",
         "  Enter    - open entry or run action",
-        "  Esc      - logout",
+        "  Esc/Q    - logout",
         "  Alt+V / Ctrl+V - show this help",
         "",
         "Actions:",
@@ -957,7 +960,7 @@ function Show-EntryList {
             Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$enabled -Color $color
         }
         Write-Host ""
-        Write-Host "Arrows: Up/Down move, Enter select, Esc logout." -ForegroundColor DarkGray
+        Write-Host "Arrows: Up/Down move, Enter select, Esc/Q logout." -ForegroundColor DarkGray
         Write-MenuHelpHint $helpHint
 
         $skipIndexUpdate = $false
@@ -1030,6 +1033,7 @@ function Show-EntryList {
                 }
             }
             "Escape" { return @{ Action = "logout"; SelectedIndex = $SelectedIndex; SearchTerm = $SearchTerm } }
+            "Q" { return @{ Action = "logout"; SelectedIndex = $SelectedIndex; SearchTerm = $SearchTerm } }
         }
         if ($skipIndexUpdate) { continue }
         if ($map.Count -gt 0) {
@@ -1063,8 +1067,8 @@ function Show-AccountMenu {
     $helpLines = @(
         "VaultX main menu:",
         "  Up/Down  - move selection",
-        "  Enter    - confirm action",
-        "  Esc      - quit",
+        "  Enter    - confirm action (or login on an account)",
+        "  Esc/Q    - quit",
         "  Alt+V / Ctrl+V - show this help",
         "",
         "Accounts:",
@@ -1125,7 +1129,7 @@ function Show-AccountMenu {
                 Write-MenuItem -Text $quitAction.Label -IsSelected $isSelected -IsActive:$true -Color $color
             }
             Write-Host ""
-            Write-Host "Arrows: Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
+            Write-Host "Arrows: Up/Down move, Enter select, Esc/Q quit." -ForegroundColor DarkGray
             Write-MenuHelpHint $helpHint
             $key = Read-MenuKey
             if ($key.Key -eq "V" -and (($key.Modifiers -band [ConsoleModifiers]::Alt) -ne 0 -or ($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)) {
@@ -1162,8 +1166,7 @@ function Show-AccountMenu {
                 }
                 "Enter" {
                     if ($focus -eq "accounts") {
-                        $focus = "actions"
-                        break
+                        return @{ Action = "login"; Selected = $Selected }
                     }
                     $action = $actions[$actionSelected]
                     if ($action.RequiresAccount -and $Accounts.Count -eq 0) {
@@ -1173,6 +1176,7 @@ function Show-AccountMenu {
                     return @{ Action = $action.Action; Selected = $Selected }
                 }
                 "Escape" { return @{ Action = "quit"; Selected = $Selected } }
+                "Q" { return @{ Action = "quit"; Selected = $Selected } }
             }
         }
     } finally {
@@ -1423,6 +1427,15 @@ function Close-VaultX {
     }
 }
 
+function Quit-VaultX {
+    param([string]$Message)
+    Clear-VaultSession
+    if ($Message) {
+        Write-Host $Message -ForegroundColor DarkGray
+    }
+    exit
+}
+
 function Register-VaultXSession {
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) { return }
@@ -1435,6 +1448,10 @@ function Register-VaultXSession {
     if (-not (Test-Path Function:\global:Close-VaultX)) {
         $close = [ScriptBlock]::Create("& '$escaped' -Close")
         Set-Item -Path Function:\global:Close-VaultX -Value $close
+    }
+    if (-not (Test-Path Function:\global:Quit-VaultX)) {
+        $quit = [ScriptBlock]::Create("& '$escaped' -Quit")
+        Set-Item -Path Function:\global:Quit-VaultX -Value $quit
     }
 }
 
@@ -1491,6 +1508,10 @@ if ($Help) {
 if (-not $script:IsDotSourced) {
     if ($Close) {
         Close-VaultX -Message "$script:AppName closed."
+        return
+    }
+    if ($Quit) {
+        Quit-VaultX -Message "$script:AppName closed."
         return
     }
     try {
