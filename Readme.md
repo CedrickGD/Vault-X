@@ -19,7 +19,7 @@ VaultX is a local, single-user password manager implemented as a PowerShell scri
 ## Files
 - `VaultX.ps1`: the main script and UI.
 - `ExecutionPolicy.md`: guidance for allowing script execution on Windows.
-- `PROJECT.md`: this project overview.
+- `Readme.md`: this project overview.
 
 ## Notes
 VaultX is designed for local use. Keep your master password safe: it cannot be recovered if lost.
