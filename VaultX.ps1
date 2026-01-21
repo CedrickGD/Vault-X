@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script:AppName = "VaultX"
-$script:AppVersion = "1.0.1"
+$script:AppVersion = "1.0.2"
 $script:UpdateConfigUrl = "https://raw.githubusercontent.com/CedrickGD/Vault-X/main/version.yml"
 $script:UpdateCheckEnabled = ($env:VAULTX_UPDATE_CHECK -ne "0")
 $script:SkipShellOnQuit = $false
