@@ -953,8 +953,8 @@ function Show-EntryList {
         $actionSelected = [Math]::Max(0, [Math]::Min($actionSelected, $visibleActions.Count - 1))
 
         Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
-        $subtitle = "Vault entries"
-        if ($AccountName) { $subtitle = "Vault entries - $AccountName" }
+        $subtitle = "Databases"
+        if ($AccountName) { $subtitle = "Databases - $AccountName" }
         Write-Header $subtitle -ShowBanner
         if (-not [string]::IsNullOrWhiteSpace($SearchTerm)) {
             Write-Host ("Search: " + $SearchTerm) -ForegroundColor DarkGray
@@ -1004,7 +1004,7 @@ function Show-EntryList {
             $action = $visibleActions[$i]
             $isSelected = ($focus -eq "actions" -and $i -eq $actionSelected)
             $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-            Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Align "Center"
+            Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color
         }
         Write-Host ""
         Write-Host "Arrows: Up/Down move, Enter select, Esc/Q logout." -ForegroundColor DarkGray
@@ -1133,12 +1133,11 @@ function Show-AccountMenu {
                 Write-Host "No accounts yet." -ForegroundColor DarkGray
             } else {
                 Write-Host "Accounts" -ForegroundColor DarkGray
-                $accountWidth = Get-MenuBlockWidth -Items @($Accounts | ForEach-Object { $_.Name }) -MaxWidth 40
                 for ($i = 0; $i -lt $Accounts.Count; $i++) {
                     $account = $Accounts[$i]
                     $isSelected = ($focus -eq "accounts" -and $i -eq $Selected)
                     $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                    Write-MenuItem -Text $account.Name -IsSelected $isSelected -Color $color -BlockWidth $accountWidth
+                    Write-MenuItem -Text $account.Name -IsSelected $isSelected -Color $color -Indent 0
                 }
             }
             Write-Host ""
@@ -1147,12 +1146,11 @@ function Show-AccountMenu {
                 Write-Host ("Selected: " + $Accounts[$Selected].Name) -ForegroundColor DarkGray
             }
             Write-MenuSeparator
-            $actionWidth = Get-MenuBlockWidth -Items @($visibleActions | ForEach-Object { $_.Label }) -MaxWidth 28
             for ($i = 0; $i -lt $visibleActions.Count; $i++) {
                 $action = $visibleActions[$i]
                 $isSelected = ($focus -eq "actions" -and $i -eq $actionSelected)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -BlockWidth $actionWidth
+                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
             Write-Host "Arrows: Up/Down move, Enter select, Esc/Q quit." -ForegroundColor DarkGray
@@ -1433,6 +1431,7 @@ function Invoke-VaultSession {
         }
     } finally {
         Clear-VaultSession
+        Clear-Host
     }
 }
 
