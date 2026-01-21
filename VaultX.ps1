@@ -440,7 +440,7 @@ function Show-Usage {
     Write-Host "Session shortcuts (after first run):" -ForegroundColor Gray
     Write-Host "  VaultX                 # Launch again in the same session" -ForegroundColor Gray
     Write-Host "  Close-VaultX           # Close the app session" -ForegroundColor Gray
-    Write-Host "  Quit-VaultX            # Quit the app session" -ForegroundColor Gray
+    Write-Host "  Stop-VaultX            # Quit the app session" -ForegroundColor Gray
 }
 
 function Show-Message {
@@ -1427,7 +1427,7 @@ function Close-VaultX {
     }
 }
 
-function Quit-VaultX {
+function Stop-VaultX {
     param([string]$Message)
     Clear-VaultSession
     if ($Message) {
@@ -1449,9 +1449,12 @@ function Register-VaultXSession {
         $close = [ScriptBlock]::Create("& '$escaped' -Close")
         Set-Item -Path Function:\global:Close-VaultX -Value $close
     }
-    if (-not (Test-Path Function:\global:Quit-VaultX)) {
+    if (-not (Test-Path Function:\global:Stop-VaultX)) {
         $quit = [ScriptBlock]::Create("& '$escaped' -Quit")
-        Set-Item -Path Function:\global:Quit-VaultX -Value $quit
+        Set-Item -Path Function:\global:Stop-VaultX -Value $quit
+    }
+    if (-not (Test-Path Alias:\Quit-VaultX)) {
+        Set-Alias -Name Quit-VaultX -Value Stop-VaultX -Scope Global
     }
 }
 
@@ -1511,7 +1514,7 @@ if (-not $script:IsDotSourced) {
         return
     }
     if ($Quit) {
-        Quit-VaultX -Message "$script:AppName closed."
+        Stop-VaultX -Message "$script:AppName closed."
         return
     }
     try {
