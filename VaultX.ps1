@@ -1206,7 +1206,9 @@ function Show-AccountMenu {
 
 function Show-EntryDetail {
     param($Entry)
-    $fields = Get-EntryFields $Entry
+    $fields = Get-EntryFields $Entry | Where-Object {
+        $_.Label -eq "Name" -or -not [string]::IsNullOrWhiteSpace($_.Value)
+    }
     $items = @()
     foreach ($field in $fields) {
         $items += @{ Type = "field"; Field = $field }
@@ -1305,12 +1307,6 @@ function Read-Entry {
         Write-Header ("Edit entry: " + $Existing.Title)
     } else {
         Write-Header "Add new entry"
-    }
-    Write-Host "Press Enter to continue or Esc to abort." -ForegroundColor DarkGray
-    while ($true) {
-        $key = Read-MenuKey -Prompt "Command (enter/esc)"
-        if ($key.Key -eq "Escape") { return $null }
-        if ($key.Key -eq "Enter") { break }
     }
 
     if ($isEdit) {
