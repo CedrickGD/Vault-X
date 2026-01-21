@@ -628,12 +628,23 @@ function Write-MenuItem {
         [bool]$IsSelected,
         [bool]$IsActive = $true,
         [ConsoleColor]$Color = [ConsoleColor]::Gray,
-        [int]$Indent = 2
+        [int]$Indent = 2,
+        [ValidateSet("Left", "Center")]
+        [string]$Align = "Left"
     )
     $maxWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent + 4))
     $safeText = Format-MenuText -Text $Text -Max $maxWidth
+    $pointerColor = if ($IsActive) { $script:MenuHighlightColor } else { $script:MenuHighlightColor }
+    if ($Align -eq "Center") {
+        $prefix = if ($IsSelected) { "$script:MenuPointerSymbol " } else { "  " }
+        $line = $prefix + $safeText
+        $width = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
+        $padding = [Math]::Max(0, [Math]::Floor(($width - $line.Length) / 2))
+        if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
+        Write-Host ((" " * $padding) + $line) -ForegroundColor $Color
+        return
+    }
     if ($IsSelected) {
-        $pointerColor = if ($IsActive) { $script:MenuHighlightColor } else { $script:MenuDisabledColor }
         if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
         Write-Host $script:MenuPointerSymbol -ForegroundColor $pointerColor -NoNewline
         Write-Host " " -NoNewline
@@ -668,7 +679,7 @@ function Show-ActionMenu {
                 $line = $Options[$i]
                 $isSelected = ($i -eq $Selected)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $line -IsSelected $isSelected -Color $color
+                Write-MenuItem -Text $line -IsSelected $isSelected -Color $color -Align "Center"
             }
             Write-Host ""
             Write-Host "Use Up/Down to move, Enter to select, Esc to cancel." -ForegroundColor DarkGray
@@ -893,7 +904,14 @@ function Show-EntryList {
 
         $hasEntries = ($filtered.Count -gt 0)
         $hasSearch = (-not [string]::IsNullOrWhiteSpace($SearchTerm))
-        $actionSelected = [Math]::Max(0, [Math]::Min($actionSelected, $actions.Count - 1))
+        $visibleActions = @()
+        foreach ($action in $actions) {
+            if ($action.RequiresEntry -and -not $hasEntries) { continue }
+            if ($action.ContainsKey("RequiresSearch") -and $action.RequiresSearch -and -not $hasSearch) { continue }
+            $visibleActions += $action
+        }
+        if ($visibleActions.Count -eq 0) { $visibleActions = @(@{ Label = "Logout"; Action = "logout" }) }
+        $actionSelected = [Math]::Max(0, [Math]::Min($actionSelected, $visibleActions.Count - 1))
 
         Clear-Host
         $subtitle = "Vault entries"
@@ -943,18 +961,11 @@ function Show-EntryList {
         if ($hasEntries) {
             Write-Host ("Selected: " + $filtered[$selectedPos].Title) -ForegroundColor DarkGray
         }
-        for ($i = 0; $i -lt $actions.Count; $i++) {
-            $action = $actions[$i]
-            $enabled = $true
-            if ($action.RequiresEntry -and -not $hasEntries) { $enabled = $false }
-            if ($action.ContainsKey("RequiresSearch") -and $action.RequiresSearch -and -not $hasSearch) { $enabled = $false }
+        for ($i = 0; $i -lt $visibleActions.Count; $i++) {
+            $action = $visibleActions[$i]
             $isSelected = ($focus -eq "actions" -and $i -eq $actionSelected)
-            if ($enabled) {
-                $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-            } else {
-                $color = $script:MenuDisabledColor
-            }
-            Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$enabled -Color $color
+            $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
+            Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Align "Center"
         }
         Write-Host ""
         Write-Host "Arrows: Up/Down move, Enter select, Esc/Q logout." -ForegroundColor DarkGray
@@ -988,7 +999,7 @@ function Show-EntryList {
                         $focus = "actions"
                     }
                 } else {
-                    if ($actionSelected -lt ($actions.Count - 1)) {
+                    if ($actionSelected -lt ($visibleActions.Count - 1)) {
                         $actionSelected++
                     }
                 }
@@ -999,15 +1010,7 @@ function Show-EntryList {
                     Show-Message "No entries available." ([ConsoleColor]::Red)
                     break
                 }
-                $action = $actions[$actionSelected]
-                if ($action.RequiresEntry -and -not $hasEntries) {
-                    Show-Message "No entries available." ([ConsoleColor]::Red)
-                    break
-                }
-                if ($action.ContainsKey("RequiresSearch") -and $action.RequiresSearch -and -not $hasSearch) {
-                    Show-Message "No active search." ([ConsoleColor]::Yellow)
-                    break
-                }
+                $action = $visibleActions[$actionSelected]
                 switch ($action.Action) {
                     "view" { return @{ Action = "view"; SelectedIndex = $map[$selectedPos]; SearchTerm = $SearchTerm } }
                     "edit" { return @{ Action = "edit"; SelectedIndex = $map[$selectedPos]; SearchTerm = $SearchTerm } }
@@ -1077,7 +1080,12 @@ function Show-AccountMenu {
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
         while ($true) {
-            $actionSelected = [Math]::Max(0, [Math]::Min($actionSelected, $actions.Count - 1))
+            $visibleActions = @()
+            foreach ($action in $actions) {
+                if ($action.RequiresAccount -and $Accounts.Count -eq 0) { continue }
+                $visibleActions += $action
+            }
+            $actionSelected = [Math]::Max(0, [Math]::Min($actionSelected, $visibleActions.Count - 1))
             Clear-Host
             Write-Header "Main Menu" -ShowBanner
             Write-MenuPrompt "VaultX Main Menu: What would you like to do?"
@@ -1089,7 +1097,7 @@ function Show-AccountMenu {
                     $account = $Accounts[$i]
                     $isSelected = ($focus -eq "accounts" -and $i -eq $Selected)
                     $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                    Write-MenuItem -Text $account.Name -IsSelected $isSelected -Color $color
+                    Write-MenuItem -Text $account.Name -IsSelected $isSelected -Color $color -Align "Center"
                 }
             }
             Write-Host ""
@@ -1098,32 +1106,11 @@ function Show-AccountMenu {
                 Write-Host ("Selected: " + $Accounts[$Selected].Name) -ForegroundColor DarkGray
             }
             Write-MenuSeparator
-            for ($i = 0; $i -lt $actions.Count; $i++) {
-                $action = $actions[$i]
-                if ($action.Action -eq "quit") { continue }
-                $enabled = $true
-                if ($action.RequiresAccount -and $Accounts.Count -eq 0) { $enabled = $false }
+            for ($i = 0; $i -lt $visibleActions.Count; $i++) {
+                $action = $visibleActions[$i]
                 $isSelected = ($focus -eq "actions" -and $i -eq $actionSelected)
-                if ($enabled) {
-                    $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                } else {
-                    $color = $script:MenuDisabledColor
-                }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$enabled -Color $color
-            }
-            Write-MenuSeparator
-            $quitIndex = -1
-            for ($i = 0; $i -lt $actions.Count; $i++) {
-                if ($actions[$i].Action -eq "quit") {
-                    $quitIndex = $i
-                    break
-                }
-            }
-            if ($quitIndex -ge 0) {
-                $quitAction = $actions[$quitIndex]
-                $isSelected = ($focus -eq "actions" -and $quitIndex -eq $actionSelected)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $quitAction.Label -IsSelected $isSelected -IsActive:$true -Color $color
+                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Align "Center"
             }
             Write-Host ""
             Write-Host "Arrows: Up/Down move, Enter select, Esc/Q quit." -ForegroundColor DarkGray
@@ -1156,7 +1143,7 @@ function Show-AccountMenu {
                             $actionSelected = 0
                         }
                     } else {
-                        if ($actionSelected -lt ($actions.Count - 1)) {
+                        if ($actionSelected -lt ($visibleActions.Count - 1)) {
                             $actionSelected++
                         }
                     }
@@ -1165,11 +1152,7 @@ function Show-AccountMenu {
                     if ($focus -eq "accounts") {
                         return @{ Action = "login"; Selected = $Selected }
                     }
-                    $action = $actions[$actionSelected]
-                    if ($action.RequiresAccount -and $Accounts.Count -eq 0) {
-                        Show-Message "No accounts available." ([ConsoleColor]::Red)
-                        break
-                    }
+                    $action = $visibleActions[$actionSelected]
                     return @{ Action = $action.Action; Selected = $Selected }
                 }
                 "Escape" { return @{ Action = "quit"; Selected = $Selected } }
@@ -1188,7 +1171,9 @@ function Show-EntryDetail {
     foreach ($field in $fields) {
         $items += @{ Type = "field"; Field = $field }
     }
-    $items += @{ Type = "action"; Label = "Open URL"; Enabled = (-not [string]::IsNullOrWhiteSpace($Entry.Url)) }
+    if (-not [string]::IsNullOrWhiteSpace($Entry.Url)) {
+        $items += @{ Type = "action"; Label = "Open URL" }
+    }
     $items += @{ Type = "action"; Label = "Edit entry" }
     $items += @{ Type = "action"; Label = "Back" }
     $selected = 0
@@ -1201,23 +1186,15 @@ function Show-EntryDetail {
             $labelWidth = 12
             for ($i = 0; $i -lt $items.Count; $i++) {
                 $item = $items[$i]
-                $isActive = $true
                 if ($item.Type -eq "field") {
                     $display = Format-DisplayValue $item.Field.Display 60
                     $line = ("{0,-$labelWidth} : {1}" -f $item.Field.Label, $display)
                 } else {
-                    if ($item.PSObject.Properties.Match("Enabled").Count -gt 0 -and -not $item.Enabled) {
-                        $isActive = $false
-                    }
                     $line = "[Action] " + $item.Label
                 }
                 $isSelected = ($i -eq $selected)
-                if ($isActive) {
-                    $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                } else {
-                    $color = $script:MenuDisabledColor
-                }
-                Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$isActive -Color $color
+                $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
+                Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$true -Color $color
             }
             Write-Host ""
             Write-Host "Enter copies field or runs action, Esc to back." -ForegroundColor DarkGray
@@ -1239,11 +1216,7 @@ function Show-EntryDetail {
                             }
                         }
                     } elseif ($item.Label -eq "Open URL") {
-                        if ($item.PSObject.Properties.Match("Enabled").Count -gt 0 -and -not $item.Enabled) {
-                            Show-Message "No URL available to open." ([ConsoleColor]::Yellow)
-                        } else {
-                            Open-WebUrl -Url $Entry.Url
-                        }
+                        Open-WebUrl -Url $Entry.Url
                     } elseif ($item.Label -eq "Edit entry") {
                         return "edit"
                     } elseif ($item.Label -eq "Back") {
@@ -1361,58 +1334,62 @@ function Invoke-VaultSession {
     $selectedIndex = 0
     $searchTerm = ""
 
-    while ($true) {
-        $result = Show-EntryList -Entries $script:VaultData.Entries -SelectedIndex $selectedIndex -SearchTerm $searchTerm -AccountName $script:VaultMeta.AccountName
-        if ($null -eq $result) { break }
-        $selectedIndex = $result.SelectedIndex
-        $searchTerm = $result.SearchTerm
-        switch ($result.Action) {
-            "view" {
-                $entry = $script:VaultData.Entries[$selectedIndex]
-                while ($true) {
-                    $action = Show-EntryDetail -Entry $entry
-                    if ($action -eq "edit") {
+    try {
+        while ($true) {
+            $result = Show-EntryList -Entries $script:VaultData.Entries -SelectedIndex $selectedIndex -SearchTerm $searchTerm -AccountName $script:VaultMeta.AccountName
+            if ($null -eq $result) { break }
+            $selectedIndex = $result.SelectedIndex
+            $searchTerm = $result.SearchTerm
+            switch ($result.Action) {
+                "view" {
+                    $entry = $script:VaultData.Entries[$selectedIndex]
+                    while ($true) {
+                        $action = Show-EntryDetail -Entry $entry
+                        if ($action -eq "edit") {
+                            $updated = Read-Entry -Existing $entry
+                            if ($null -ne $updated) {
+                                Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                                $entry = $updated
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                }
+                "add" {
+                    $newEntry = Read-Entry
+                    if ($null -ne $newEntry) {
+                        $script:VaultData.Entries += $newEntry
+                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                        $selectedIndex = $script:VaultData.Entries.Count - 1
+                    }
+                }
+                "edit" {
+                    if ($script:VaultData.Entries.Count -gt 0) {
+                        $entry = $script:VaultData.Entries[$selectedIndex]
                         $updated = Read-Entry -Existing $entry
                         if ($null -ne $updated) {
                             Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
-                            $entry = $updated
-                        }
-                    } else {
-                        break
-                    }
-                }
-            }
-            "add" {
-                $newEntry = Read-Entry
-                if ($null -ne $newEntry) {
-                    $script:VaultData.Entries += $newEntry
-                    Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
-                    $selectedIndex = $script:VaultData.Entries.Count - 1
-                }
-            }
-            "edit" {
-                if ($script:VaultData.Entries.Count -gt 0) {
-                    $entry = $script:VaultData.Entries[$selectedIndex]
-                    $updated = Read-Entry -Existing $entry
-                    if ($null -ne $updated) {
-                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
-                    }
-                }
-            }
-            "delete" {
-                if ($script:VaultData.Entries.Count -gt 0) {
-                    $entry = $script:VaultData.Entries[$selectedIndex]
-                    if (Confirm-Action "Delete '$($entry.Title)'?") {
-                        $script:VaultData.Entries = @($script:VaultData.Entries | Where-Object { $_.Id -ne $entry.Id })
-                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
-                        if ($selectedIndex -ge $script:VaultData.Entries.Count) {
-                            $selectedIndex = [Math]::Max(0, $script:VaultData.Entries.Count - 1)
                         }
                     }
                 }
+                "delete" {
+                    if ($script:VaultData.Entries.Count -gt 0) {
+                        $entry = $script:VaultData.Entries[$selectedIndex]
+                        if (Confirm-Action "Delete '$($entry.Title)'?") {
+                            $script:VaultData.Entries = @($script:VaultData.Entries | Where-Object { $_.Id -ne $entry.Id })
+                            Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                            if ($selectedIndex -ge $script:VaultData.Entries.Count) {
+                                $selectedIndex = [Math]::Max(0, $script:VaultData.Entries.Count - 1)
+                            }
+                        }
+                    }
+                }
+                "logout" { break }
             }
-            "logout" { break }
         }
+    } finally {
+        Clear-VaultSession
     }
 }
 
