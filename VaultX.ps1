@@ -17,7 +17,8 @@ $script:MenuHighlightColor = [ConsoleColor]::Cyan
 $script:MenuDisabledColor = [ConsoleColor]::DarkGray
 $script:MenuSeparatorColor = [ConsoleColor]::DarkGray
 $script:MenuPromptColor = [ConsoleColor]::Gray
-$script:MenuPointerSymbol = "❯"
+$script:MenuPointerSymbol = ">"
+$script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
 
 function Convert-SecureStringToPlain {
     param([Security.SecureString]$Secure)
@@ -49,7 +50,49 @@ function New-RandomBytes {
 }
 
 function Get-AppDir {
-    return (Join-Path $env:LOCALAPPDATA $script:AppName)
+    $root = $env:LOCALAPPDATA
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = $env:TEMP
+    }
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        return $null
+    }
+    return (Join-Path $root $script:AppName)
+}
+
+function Get-LogPath {
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir)) {
+        $fallback = $env:TEMP
+        if ([string]::IsNullOrWhiteSpace($fallback)) {
+            $fallback = $PWD.Path
+        }
+        $dir = $fallback
+    }
+    return (Join-Path $dir "vaultx.log")
+}
+
+function Write-Log {
+    param([string]$Message)
+    try {
+        $path = Get-LogPath
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
+        $dir = Split-Path -Parent $path
+        if ($dir -and -not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir | Out-Null
+        }
+        $stamp = (Get-Date).ToString("s")
+        Add-Content -Path $path -Value ("[{0}] {1}" -f $stamp, $Message) -Encoding UTF8
+    } catch {
+    }
+}
+
+function Wait-ForExit {
+    param([string]$Prompt = "Press Enter to close VaultX.")
+    try {
+        [void](Read-Host $Prompt)
+    } catch {
+    }
 }
 
 function Get-AccountsPath {
@@ -340,53 +383,23 @@ function Test-VaultMeta {
 }
 
 function Write-Banner {
-    $v = @(
-        "\     /",
-        " \   / ",
-        "  \ /  ",
-        "   \/  ",
-        "       "
-    )
-    $a = @(
-        "   /\  ",
-        "  /  \ ",
-        " /____\",
-        "/      \",
-        "/      \"
-    )
-    $u = @(
-        "\     /",
-        "\     /",
-        "\     /",
-        "\     /",
-        " \___/ "
-    )
-    $l = @(
-        "/      ",
-        "/      ",
-        "/      ",
-        "/      ",
-        "/______"
-    )
-    $t = @(
-        "-------",
-        "   /   ",
-        "   /   ",
-        "   /   ",
-        "   /   "
-    )
-    $x = @(
-        "\     /",
-        " \   / ",
-        "  \ /  ",
-        "  / \  ",
-        " /   \ "
-    )
-    $lines = for ($i = 0; $i -lt $v.Count; $i++) {
-        ($v[$i], $a[$i], $u[$i], $l[$i], $t[$i], "", $x[$i]) -join "  "
-    }
-    foreach ($line in $lines) {
-        Write-Host $line -ForegroundColor Cyan
+    $banner = @'
+____   _________   ____ ___.____  ___________ ____  ___
+\   \ /   /  _  \ |    |   \    | \__    ___/ \   \/  /
+ \   Y   /  /_\  \|    |   /    |   |    |     \     / 
+  \     /    |    \    |  /|    |___|    |     /     \ 
+   \___/\____|__  /______/ |_______ \____|    /___/\  \
+                \/                 \/               \_/
+'@
+    try {
+        $lines = $banner -split "\r?\n"
+        foreach ($line in $lines) {
+            if ($line -ne "") {
+                Write-Host $line -ForegroundColor Cyan
+            }
+        }
+    } catch {
+        Write-Log ("Banner render failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -402,7 +415,12 @@ function Write-Header {
         "{0} v{1}" -f $script:AppName, $script:AppVersion
     }
     Write-Host $greeting -ForegroundColor DarkGray
-    Write-Host $titleLine -ForegroundColor Cyan
+    if ($ShowBanner) {
+        Write-Banner
+        Write-Host $titleLine -ForegroundColor DarkGray
+    } else {
+        Write-Host $titleLine -ForegroundColor Cyan
+    }
     if ($Subtitle) {
         Write-Host $Subtitle -ForegroundColor Gray
     }
@@ -503,6 +521,37 @@ function Set-ClipboardSafe {
         return $true
     } catch {
         return $false
+    }
+}
+
+function ConvertTo-WebUrl {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
+    $trimmed = $Url.Trim()
+    if ($trimmed -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
+        $trimmed = "https://$trimmed"
+    }
+    $uri = $null
+    if ([Uri]::TryCreate($trimmed, [UriKind]::Absolute, [ref]$uri)) {
+        if ($uri.Scheme -in @("http", "https")) {
+            return $uri.AbsoluteUri
+        }
+    }
+    return $null
+}
+
+function Open-WebUrl {
+    param([string]$Url)
+    $normalized = ConvertTo-WebUrl -Url $Url
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+        Show-Message "URL is empty or invalid." ([ConsoleColor]::Yellow)
+        return
+    }
+    try {
+        Start-Process -FilePath $normalized | Out-Null
+        Show-Message "Opening URL..." ([ConsoleColor]::Green)
+    } catch {
+        Show-Message "Unable to open URL on this system." ([ConsoleColor]::Red)
     }
 }
 
@@ -1138,6 +1187,7 @@ function Show-EntryDetail {
     foreach ($field in $fields) {
         $items += @{ Type = "field"; Field = $field }
     }
+    $items += @{ Type = "action"; Label = "Open URL"; Enabled = (-not [string]::IsNullOrWhiteSpace($Entry.Url)) }
     $items += @{ Type = "action"; Label = "Edit entry" }
     $items += @{ Type = "action"; Label = "Back" }
     $selected = 0
@@ -1150,15 +1200,23 @@ function Show-EntryDetail {
             $labelWidth = 12
             for ($i = 0; $i -lt $items.Count; $i++) {
                 $item = $items[$i]
+                $isActive = $true
                 if ($item.Type -eq "field") {
                     $display = Format-DisplayValue $item.Field.Display 60
                     $line = ("{0,-$labelWidth} : {1}" -f $item.Field.Label, $display)
                 } else {
+                    if ($item.PSObject.Properties.Match("Enabled").Count -gt 0 -and -not $item.Enabled) {
+                        $isActive = $false
+                    }
                     $line = "[Action] " + $item.Label
                 }
                 $isSelected = ($i -eq $selected)
-                $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $line -IsSelected $isSelected -Color $color
+                if ($isActive) {
+                    $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
+                } else {
+                    $color = $script:MenuDisabledColor
+                }
+                Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$isActive -Color $color
             }
             Write-Host ""
             Write-Host "Enter copies field or runs action, Esc to back." -ForegroundColor DarkGray
@@ -1178,6 +1236,12 @@ function Show-EntryDetail {
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
+                        }
+                    } elseif ($item.Label -eq "Open URL") {
+                        if ($item.PSObject.Properties.Match("Enabled").Count -gt 0 -and -not $item.Enabled) {
+                            Show-Message "No URL available to open." ([ConsoleColor]::Yellow)
+                        } else {
+                            Open-WebUrl -Url $Entry.Url
                         }
                     } elseif ($item.Label -eq "Edit entry") {
                         return "edit"
@@ -1379,6 +1443,7 @@ function Invoke-VaultX {
     $selectedAccount = 0
 
     try {
+        Write-Log "VaultX started."
         Register-VaultXSession
         while ($true) {
             $menu = Show-AccountMenu -Accounts $accounts -Selected $selectedAccount
@@ -1413,6 +1478,7 @@ function Invoke-VaultX {
         }
     } finally {
         Clear-VaultSession
+        Write-Log "VaultX session closed."
     }
 }
 
@@ -1431,7 +1497,13 @@ if (-not $script:IsDotSourced) {
         Invoke-VaultX
     } catch {
         Show-Message "VaultX hit an unexpected error." ([ConsoleColor]::Red)
+        Write-Log ("Unhandled error: {0}" -f $_.Exception.Message)
+        Write-Log ($_.Exception | Out-String)
+        Wait-ForExit -Prompt "Press Enter to close VaultX."
     } finally {
         Close-VaultX
+        if ($script:WaitOnExit) {
+            Wait-ForExit -Prompt "Press Enter to close VaultX."
+        }
     }
 }
