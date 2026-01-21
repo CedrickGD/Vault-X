@@ -5,7 +5,8 @@ VaultX - simple local password manager (single-user, local encryption)
 [CmdletBinding()]
 param(
     [switch]$Close,
-    [switch]$Help
+    [switch]$Help,
+    [switch]$OpenData
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,6 +62,26 @@ function Get-AppDir {
         return $null
     }
     return (Join-Path $root $script:AppName)
+}
+
+function Open-AppDataFolder {
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir)) {
+        Show-Message "Data folder unavailable." ([ConsoleColor]::Red)
+        return $false
+    }
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+    }
+    try {
+        Start-Process -FilePath $dir -ErrorAction Stop | Out-Null
+        Show-Message ("Data folder: " + $dir) ([ConsoleColor]::Green)
+        return $true
+    } catch {
+        Write-Log ("Open data folder failed: {0}" -f $_.Exception.Message)
+        Show-Message "Unable to open data folder." ([ConsoleColor]::Red)
+        return $false
+    }
 }
 
 function Get-LogPath {
@@ -157,6 +178,27 @@ function ConvertTo-VersionString {
     return $clean
 }
 
+function Normalize-VersionString {
+    param([string]$Value)
+    $clean = ConvertTo-VersionString -Value $Value
+    if ([string]::IsNullOrWhiteSpace($clean)) { return $null }
+    $parts = $clean -split "\."
+    $numbers = @()
+    foreach ($part in $parts) {
+        if ([string]::IsNullOrWhiteSpace($part)) { continue }
+        $num = 0
+        if (-not [int]::TryParse($part, [ref]$num)) {
+            return $clean
+        }
+        $numbers += $num
+    }
+    if ($numbers.Count -eq 0) { return $clean }
+    while ($numbers.Count -gt 1 -and $numbers[-1] -eq 0) {
+        $numbers = $numbers[0..($numbers.Count - 2)]
+    }
+    return ($numbers -join ".")
+}
+
 function Resolve-UpdateTemplate {
     param([string]$Value, [string]$Version)
     if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
@@ -164,10 +206,37 @@ function Resolve-UpdateTemplate {
     return ($Value -replace "\{version\}", $Version)
 }
 
+function Test-IsDevelopmentCopy {
+    $scriptPath = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) { return $false }
+    $root = Split-Path -Parent $scriptPath
+    if ([string]::IsNullOrWhiteSpace($root)) { return $false }
+    return (Test-Path (Join-Path $root ".git"))
+}
+
+function Test-UpdateDownloadUrl {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+    try {
+        $response = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -ErrorAction Stop
+        if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) { return $true }
+    } catch {
+        $status = $null
+        try { $status = $_.Exception.Response.StatusCode } catch { }
+        if ($status) {
+            Write-Log ("Update download check failed: HTTP {0}" -f [int]$status)
+        } else {
+            Write-Log ("Update download check failed: {0}" -f $_.Exception.Message)
+        }
+        return $false
+    }
+    return $false
+}
+
 function Compare-VersionString {
     param([string]$Current, [string]$Latest)
-    $currentClean = ConvertTo-VersionString -Value $Current
-    $latestClean = ConvertTo-VersionString -Value $Latest
+    $currentClean = Normalize-VersionString -Value $Current
+    $latestClean = Normalize-VersionString -Value $Latest
     if ([string]::IsNullOrWhiteSpace($currentClean) -or [string]::IsNullOrWhiteSpace($latestClean)) {
         return 0
     }
@@ -233,6 +302,7 @@ function Invoke-UpdateCheck {
     param([string]$CurrentVersion)
     if (-not $script:UpdateCheckEnabled) { return $false }
     if ([string]::IsNullOrWhiteSpace($script:UpdateConfigUrl)) { return $false }
+    if (Test-IsDevelopmentCopy) { return $false }
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     } catch {
@@ -255,6 +325,7 @@ function Invoke-UpdateCheck {
     if (Compare-VersionString -Current $currentDisplay -Latest $latestDisplay -ge 0) { return $false }
     $downloadUrl = Resolve-UpdateTemplate -Value $info.Url -Version $latestDisplay
     if ([string]::IsNullOrWhiteSpace($downloadUrl)) { return $false }
+    if (-not (Test-UpdateDownloadUrl -Url $downloadUrl)) { return $false }
     $subtitle = ("Current: {0}  Latest: {1}" -f $currentDisplay, $latestDisplay)
     $updateNow = $info.Mandatory
     if (-not $updateNow) {
@@ -308,7 +379,7 @@ function Get-Accounts {
         if ($null -eq $data) { return @() }
         return @($data)
     } catch {
-        Show-Message "Database list file is corrupted. Starting with empty list." ([ConsoleColor]::Red)
+        Show-Message "Vault list file is corrupted. Starting with empty list." ([ConsoleColor]::Red)
         return @()
     }
 }
@@ -324,16 +395,125 @@ function Save-Accounts {
     Set-Content -Path $path -Value $json -Encoding UTF8
 }
 
+function Get-UniqueAccountName {
+    param([array]$Accounts, [string]$BaseName)
+    $base = if ([string]::IsNullOrWhiteSpace($BaseName)) { "Imported vault" } else { $BaseName.Trim() }
+    if (-not ($Accounts | Where-Object { $_.Name -ieq $base })) { return $base }
+    $index = 2
+    while ($true) {
+        $candidate = "$base ($index)"
+        if (-not ($Accounts | Where-Object { $_.Name -ieq $candidate })) { return $candidate }
+        $index++
+    }
+}
+
+function Get-AccountNameFromFile {
+    param([string]$FileName)
+    $base = [IO.Path]::GetFileNameWithoutExtension($FileName)
+    if ($base -match "^vault_(.+)_[0-9A-Fa-f]{8}$") {
+        return ($Matches[1] -replace "_", " ")
+    }
+    return $base
+}
+
+function Sync-AccountsWithVaultFiles {
+    param([array]$Accounts)
+    if ($null -eq $Accounts) { $Accounts = @() }
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path $dir)) { return $Accounts }
+    $vaultFiles = Get-ChildItem -Path $dir -Filter "vault_*.json" -File -ErrorAction SilentlyContinue
+    if ($null -eq $vaultFiles -or $vaultFiles.Count -eq 0) { return $Accounts }
+
+    $fileIndex = @{}
+    foreach ($account in $Accounts) {
+        if ($account.File) { $fileIndex[$account.File.ToLowerInvariant()] = $true }
+    }
+
+    $updated = @($Accounts)
+    $added = $false
+    foreach ($file in $vaultFiles) {
+        $key = $file.Name.ToLowerInvariant()
+        if ($fileIndex.ContainsKey($key)) { continue }
+        $meta = $null
+        try {
+            $meta = Get-Content -Path $file.FullName -Raw | ConvertFrom-Json
+        } catch {
+            continue
+        }
+        if (-not (Test-VaultMeta -Meta $meta)) { continue }
+        $name = $meta.AccountName
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            $name = Get-AccountNameFromFile -FileName $file.Name
+        }
+        $name = Get-UniqueAccountName -Accounts $updated -BaseName $name
+        $updated += [ordered]@{
+            Name = $name
+            File = $file.Name
+            CreatedAt = (Get-Date).ToString("s")
+        }
+        $fileIndex[$key] = $true
+        $added = $true
+    }
+
+    if ($added) {
+        Save-Accounts -Accounts $updated
+    }
+    return $updated
+}
+
+function Remove-BrokenVaultFiles {
+    param([string]$Dir)
+    if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path $Dir)) { return 0 }
+    $files = Get-ChildItem -Path $Dir -Filter "vault_*.json" -File -ErrorAction SilentlyContinue
+    if ($null -eq $files -or $files.Count -eq 0) { return 0 }
+    $removed = 0
+    foreach ($file in $files) {
+        $meta = $null
+        try {
+            $meta = Get-Content -Path $file.FullName -Raw | ConvertFrom-Json
+        } catch {
+            Remove-Item -Path $file.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path $file.FullName)) { $removed++ }
+            continue
+        }
+        if (-not (Test-VaultMeta -Meta $meta)) {
+            Remove-Item -Path $file.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path $file.FullName)) { $removed++ }
+        }
+    }
+    return $removed
+}
+
+function Wipe-VaultCache {
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir)) {
+        Show-Message "Data folder unavailable." ([ConsoleColor]::Red)
+        return $false
+    }
+    if (-not (Confirm-Action "Wipe cache and remove broken vault files?")) { return $false }
+    $cachePath = Get-AccountsPath
+    if (Test-Path $cachePath) {
+        Remove-Item -Path $cachePath -Force -ErrorAction SilentlyContinue
+    }
+    $removed = Remove-BrokenVaultFiles -Dir $dir
+    if ($removed -gt 0) {
+        Show-Message ("Cache cleared. Removed {0} broken vault file(s)." -f $removed) ([ConsoleColor]::Green)
+    } else {
+        Show-Message "Cache cleared." ([ConsoleColor]::Green)
+    }
+    return $true
+}
+
 function Read-AccountName {
     param([array]$Accounts)
     while ($true) {
         Clear-Host
-        Write-Header "Create database"
-        $name = Read-Host "Database name (required, Enter to abort)"
+        Write-Header "Create vault"
+        $name = Read-Host "Vault name (required, Enter to abort)"
         if ([string]::IsNullOrWhiteSpace($name)) { return $null }
         $exists = $Accounts | Where-Object { $_.Name -ieq $name }
         if ($exists) {
-            Show-Message "Database already exists." ([ConsoleColor]::Red)
+            Show-Message "Vault already exists." ([ConsoleColor]::Red)
             continue
         }
         return $name.Trim()
@@ -370,7 +550,7 @@ function Remove-Account {
     if (-not (Confirm-AccountPassword -VaultPath $vaultPath -AccountName $account.Name)) {
         return $Accounts
     }
-    if (-not (Confirm-Action "Delete database '$($account.Name)' and its data?")) {
+    if (-not (Confirm-Action "Delete vault '$($account.Name)' and its data?")) {
         return $Accounts
     }
     if (Test-Path $vaultPath) {
@@ -384,23 +564,23 @@ function Remove-Account {
 function Confirm-AccountPassword {
     param([string]$VaultPath, [string]$AccountName)
     if (-not (Test-Path $VaultPath)) {
-        Show-Message "Database file missing. Delete aborted." ([ConsoleColor]::Red)
+        Show-Message "Vault file missing. Delete aborted." ([ConsoleColor]::Red)
         return $false
     }
     try {
         $meta = Get-Content -Path $VaultPath -Raw | ConvertFrom-Json
     } catch {
-        Show-Message "Database file is corrupted or unreadable." ([ConsoleColor]::Red)
+        Show-Message "Vault file is corrupted or unreadable." ([ConsoleColor]::Red)
         return $false
     }
     if (-not (Test-VaultMeta -Meta $meta)) {
-        Show-Message "Database file is invalid." ([ConsoleColor]::Red)
+        Show-Message "Vault file is invalid." ([ConsoleColor]::Red)
         return $false
     }
     try {
         $salt = [Convert]::FromBase64String($meta.Salt)
     } catch {
-        Show-Message "Database encryption salt is invalid." ([ConsoleColor]::Red)
+        Show-Message "Vault encryption salt is invalid." ([ConsoleColor]::Red)
         return $false
     }
     $iterations = [int]$meta.Iterations
@@ -408,7 +588,7 @@ function Confirm-AccountPassword {
         Clear-Host
         Write-Header "Confirm deletion"
         if ($AccountName) {
-            Write-Host ("Database: " + $AccountName) -ForegroundColor DarkGray
+            Write-Host ("Vault: " + $AccountName) -ForegroundColor DarkGray
             Write-Host ""
         }
         $password = Read-SecurePlain "Master password (Enter to abort)"
@@ -613,6 +793,7 @@ function Show-Usage {
     Write-Host "Usage:" -ForegroundColor Gray
     Write-Host "  VaultX.ps1             # Launch the app" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Close       # Close the app session" -ForegroundColor Gray
+    Write-Host "  VaultX.ps1 -OpenData    # Open data folder" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Help        # Show this help" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Session shortcuts (after first run):" -ForegroundColor Gray
@@ -933,7 +1114,7 @@ function Read-NewMasterPassword {
     while ($true) {
         Clear-Host
         $title = "Set master password"
-        if ($AccountName) { $title = "Set master password for database $AccountName" }
+        if ($AccountName) { $title = "Set master password for vault $AccountName" }
         Write-Header $title
         $pw1 = Read-SecurePlain "Create master password (Enter to abort)"
         if ([string]::IsNullOrEmpty($pw1)) { return $null }
@@ -957,7 +1138,7 @@ function Open-Vault {
     )
     if (-not (Test-Path $VaultPath)) {
         if (-not $CreateIfMissing) {
-            Show-Message "Database not found." ([ConsoleColor]::Red)
+            Show-Message "Vault not found." ([ConsoleColor]::Red)
             return $null
         }
         $password = Read-NewMasterPassword -AccountName $AccountName
@@ -986,24 +1167,24 @@ function Open-Vault {
     try {
         $meta = Get-Content -Path $VaultPath -Raw | ConvertFrom-Json
     } catch {
-        Show-Message "Database file is corrupted or unreadable." ([ConsoleColor]::Red)
+        Show-Message "Vault file is corrupted or unreadable." ([ConsoleColor]::Red)
         return $null
     }
     if (-not (Test-VaultMeta -Meta $meta)) {
-        Show-Message "Database file is invalid." ([ConsoleColor]::Red)
+        Show-Message "Vault file is invalid." ([ConsoleColor]::Red)
         return $null
     }
     try {
         $salt = [Convert]::FromBase64String($meta.Salt)
     } catch {
-        Show-Message "Database encryption salt is invalid." ([ConsoleColor]::Red)
+        Show-Message "Vault encryption salt is invalid." ([ConsoleColor]::Red)
         return $null
     }
     $iterations = [int]$meta.Iterations
     while ($true) {
         Clear-Host
-        $title = "Unlock database"
-        if ($meta.AccountName) { $title = "Unlock database $($meta.AccountName)" }
+        $title = "Unlock vault"
+        if ($meta.AccountName) { $title = "Unlock vault $($meta.AccountName)" }
         Write-Header $title
         $password = Read-SecurePlain "Master password (Enter to abort)"
         if ([string]::IsNullOrEmpty($password)) { return $null }
@@ -1216,7 +1397,7 @@ function Show-EntryList {
 function Show-AccountPicker {
     param(
         [array]$Accounts,
-        [string]$Title = "Select database"
+        [string]$Title = "Select vault"
     )
     if ($Accounts.Count -eq 0) { return $null }
     $selected = 0
@@ -1271,7 +1452,7 @@ function Show-VaultMenu {
         @{ Label = "Add entry"; Action = "add"; RequiresEntry = $false }
         @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
         @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
-        @{ Label = "Back to database list"; Action = "logout"; RequiresEntry = $false }
+        @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
         @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
     )
     $selected = 0
@@ -1281,8 +1462,8 @@ function Show-VaultMenu {
         $isFirstRender = $true
         while ($true) {
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
-            $title = "Database Menu"
-            if ($AccountName) { $title = "Database Menu - $AccountName" }
+            $title = "Vault Menu"
+            if ($AccountName) { $title = "Vault Menu - $AccountName" }
             Write-Header $title -ShowBanner
             Write-Host ""
             Write-MenuSeparator -Indent 0
@@ -1322,10 +1503,14 @@ function Show-AccountMenu {
     param([array]$Accounts, [int]$Selected = 0)
     $actions = @()
     if ($Accounts.Count -gt 0) {
-        $actions += @{ Label = "Open database"; Action = "login" }
-        $actions += @{ Label = "Remove database"; Action = "delete" }
+        $actions += @{ Label = "Open existing"; Action = "login" }
     }
-    $actions += @{ Label = "Add database"; Action = "add" }
+    $actions += @{ Label = "Create new"; Action = "add" }
+    if ($Accounts.Count -gt 0) {
+        $actions += @{ Label = "Remove"; Action = "delete" }
+    }
+    $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
+    $actions += @{ Label = "Open data folder (drag & drop)"; Action = "open-data" }
     $actions += @{ Label = "Quit"; Action = "quit" }
 
     $selectedAction = 0
@@ -1337,10 +1522,10 @@ function Show-AccountMenu {
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header "Main Menu" -ShowBanner
             if ($Accounts.Count -eq 0) {
-                Write-Host "No databases yet." -ForegroundColor DarkGray
+                Write-Host "No vaults yet." -ForegroundColor DarkGray
             } else {
                 $names = $Accounts | ForEach-Object { $_.Name } | Sort-Object
-                Write-Host ("Databases: " + ($names -join ", ")) -ForegroundColor DarkGray
+                Write-Host ("Vaults: " + ($names -join ", ")) -ForegroundColor DarkGray
             }
             Write-Host ""
             Write-MenuSeparator -Indent 0
@@ -1680,6 +1865,7 @@ function Invoke-VaultX {
             return
         }
         while ($true) {
+            $accounts = Sync-AccountsWithVaultFiles -Accounts $accounts
             $menu = Show-AccountMenu -Accounts $accounts -Selected $selectedAccount
             if ($null -eq $menu) { break }
             $selectedAccount = $menu.Selected
@@ -1694,7 +1880,7 @@ function Invoke-VaultX {
                     }
                 }
                 "delete" {
-                    $chosen = Show-AccountPicker -Accounts $accounts -Title "Select database to remove"
+                    $chosen = Show-AccountPicker -Accounts $accounts -Title "Select vault to remove"
                     if ($null -ne $chosen) {
                         $accounts = Remove-Account -Accounts $accounts -Selected $chosen
                         if ($selectedAccount -ge $accounts.Count) {
@@ -1703,7 +1889,7 @@ function Invoke-VaultX {
                     }
                 }
                 "login" {
-                    $chosen = Show-AccountPicker -Accounts $accounts -Title "Select database to open"
+                    $chosen = Show-AccountPicker -Accounts $accounts -Title "Select vault to open"
                     if ($null -ne $chosen) {
                         $account = $accounts[$chosen]
                         $vaultPath = Get-VaultPath -FileName $account.File
@@ -1711,6 +1897,15 @@ function Invoke-VaultX {
                         if ($null -ne $vault) {
                             Invoke-VaultSession -VaultPath $vaultPath -Vault $vault
                         }
+                    }
+                }
+                "open-data" {
+                    Open-AppDataFolder | Out-Null
+                }
+                "wipe-cache" {
+                    if (Wipe-VaultCache) {
+                        $accounts = Sync-AccountsWithVaultFiles -Accounts @()
+                        $selectedAccount = 0
                     }
                 }
                 "quit" {
@@ -1730,6 +1925,11 @@ $script:IsDotSourced = $MyInvocation.InvocationName -eq "."
 $script:LaunchedFromFile = [string]::IsNullOrWhiteSpace($MyInvocation.Line)
 if ($Help) {
     Show-Usage
+    return
+}
+
+if ($OpenData) {
+    Open-AppDataFolder | Out-Null
     return
 }
 
