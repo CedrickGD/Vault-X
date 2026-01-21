@@ -5,7 +5,6 @@ VaultX - simple local password manager (single-user, local encryption)
 [CmdletBinding()]
 param(
     [switch]$Close,
-    [switch]$Quit,
     [switch]$Help
 )
 
@@ -434,13 +433,11 @@ function Show-Usage {
     Write-Host "Usage:" -ForegroundColor Gray
     Write-Host "  VaultX.ps1             # Launch the app" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Close       # Close the app session" -ForegroundColor Gray
-    Write-Host "  VaultX.ps1 -Quit        # Quit the app session" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Help        # Show this help" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Session shortcuts (after first run):" -ForegroundColor Gray
     Write-Host "  VaultX                 # Launch again in the same session" -ForegroundColor Gray
     Write-Host "  Close-VaultX           # Close the app session" -ForegroundColor Gray
-    Write-Host "  Stop-VaultX            # Quit the app session" -ForegroundColor Gray
 }
 
 function Show-Message {
@@ -1433,7 +1430,7 @@ function Stop-VaultX {
     if ($Message) {
         Write-Host $Message -ForegroundColor DarkGray
     }
-    exit
+    $script:QuitRequested = $true
 }
 
 function Register-VaultXSession {
@@ -1448,13 +1445,6 @@ function Register-VaultXSession {
     if (-not (Test-Path Function:\global:Close-VaultX)) {
         $close = [ScriptBlock]::Create("& '$escaped' -Close")
         Set-Item -Path Function:\global:Close-VaultX -Value $close
-    }
-    if (-not (Test-Path Function:\global:Stop-VaultX)) {
-        $quit = [ScriptBlock]::Create("& '$escaped' -Quit")
-        Set-Item -Path Function:\global:Stop-VaultX -Value $quit
-    }
-    if (-not (Test-Path Alias:\Quit-VaultX)) {
-        Set-Alias -Name Quit-VaultX -Value Stop-VaultX -Scope Global
     }
 }
 
@@ -1493,7 +1483,10 @@ function Invoke-VaultX {
                         Invoke-VaultSession -VaultPath $vaultPath -Vault $vault
                     }
                 }
-                "quit" { break }
+                "quit" {
+                    Stop-VaultX -Message "$script:AppName closed."
+                    break
+                }
             }
         }
     } finally {
@@ -1513,10 +1506,6 @@ if (-not $script:IsDotSourced) {
         Close-VaultX -Message "$script:AppName closed."
         return
     }
-    if ($Quit) {
-        Stop-VaultX -Message "$script:AppName closed."
-        return
-    }
     try {
         Invoke-VaultX
     } catch {
@@ -1529,5 +1518,8 @@ if (-not $script:IsDotSourced) {
         if ($script:WaitOnExit) {
             Wait-ForExit -Prompt "Press Enter to close VaultX."
         }
+    }
+    if ($script:QuitRequested) {
+        exit
     }
 }
