@@ -341,12 +341,11 @@ function Test-VaultMeta {
 
 function Write-Banner {
     $lines = @(
-        " __      __      _ _   _______  __   __",
-        " \\ \\    / /     | | | |__   __| \\ \\ / /",
-        "  \\ \\  / /_ _ __| | |_   | |     \\ V / ",
-        "   \\ \\/ / _` / _` | __|  | |      > <  ",
-        "    \\  / (_| | (_| | |_   | |    / . \\ ",
-        "     \\/ \\__,_|\\__,_|\\__|  |_|   /_/ \\_\\"
+        "VV   VV   AAA   U   U  L     TTTTT  XX   XX",
+        "VV   VV  A   A  U   U  L       T     XX XX ",
+        "VV   VV  AAAAA  U   U  L       T      XXX  ",
+        " VVVVV   A   A  U   U  L       T     XX XX ",
+        "  VVV    A   A   UUU   LLLLL   T    XX   XX"
     )
     foreach ($line in $lines) {
         Write-Host $line -ForegroundColor Cyan
