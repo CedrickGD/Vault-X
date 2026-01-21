@@ -14,6 +14,7 @@ $script:AppName = "VaultX"
 $script:AppVersion = "1.0.1"
 $script:UpdateConfigUrl = "https://raw.githubusercontent.com/CedrickGD/Vault-X/main/version.yml"
 $script:UpdateCheckEnabled = ($env:VAULTX_UPDATE_CHECK -ne "0")
+$script:SkipShellOnQuit = $false
 $script:MenuNormalColor = [ConsoleColor]::Gray
 $script:MenuHighlightColor = [ConsoleColor]::Cyan
 $script:MenuDisabledColor = [ConsoleColor]::DarkGray
@@ -144,6 +145,18 @@ function Convert-UpdateConfigText {
     return $result
 }
 
+function ConvertTo-VersionString {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $clean = $Value.Trim()
+    if ($clean.StartsWith("v", [StringComparison]::OrdinalIgnoreCase)) {
+        $clean = $clean.Substring(1)
+    }
+    $clean = ($clean -replace "[^0-9\.].*$", "")
+    if ([string]::IsNullOrWhiteSpace($clean)) { return $null }
+    return $clean
+}
+
 function Resolve-UpdateTemplate {
     param([string]$Value, [string]$Version)
     if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
@@ -153,12 +166,17 @@ function Resolve-UpdateTemplate {
 
 function Compare-VersionString {
     param([string]$Current, [string]$Latest)
+    $currentClean = ConvertTo-VersionString -Value $Current
+    $latestClean = ConvertTo-VersionString -Value $Latest
+    if ([string]::IsNullOrWhiteSpace($currentClean) -or [string]::IsNullOrWhiteSpace($latestClean)) {
+        return 0
+    }
     $currentVersion = $null
     $latestVersion = $null
-    if ([Version]::TryParse($Current, [ref]$currentVersion) -and [Version]::TryParse($Latest, [ref]$latestVersion)) {
+    if ([Version]::TryParse($currentClean, [ref]$currentVersion) -and [Version]::TryParse($latestClean, [ref]$latestVersion)) {
         return $currentVersion.CompareTo($latestVersion)
     }
-    return [string]::Compare($Current, $Latest, $true)
+    return [string]::Compare($currentClean, $latestClean, $true)
 }
 
 function Install-Update {
@@ -166,11 +184,11 @@ function Install-Update {
         [string]$DownloadUrl,
         [string]$LatestVersion
     )
-    if ([string]::IsNullOrWhiteSpace($DownloadUrl)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($DownloadUrl)) { return $null }
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) {
         Show-Message "Update failed: script path unavailable." ([ConsoleColor]::Red)
-        return $false
+        return $null
     }
     $tempFile = [IO.Path]::GetTempFileName()
     try {
@@ -179,21 +197,35 @@ function Install-Update {
         if ([string]::IsNullOrWhiteSpace($firstLine) -or $firstLine -match "<!DOCTYPE html|Not Found") {
             Show-Message "Update download failed." ([ConsoleColor]::Red)
             Write-Log "Update download returned invalid content."
-            return $false
+            return $null
         }
         $backupPath = "$scriptPath.bak"
         Copy-Item -Path $scriptPath -Destination $backupPath -Force
         Move-Item -Path $tempFile -Destination $scriptPath -Force
-        Show-Message ("Updated to version " + $LatestVersion + ". Restart VaultX to use the new version.") ([ConsoleColor]::Green)
-        return $true
+        Show-Message ("Updated to version " + $LatestVersion + ". Restarting VaultX...") ([ConsoleColor]::Green)
+        return $scriptPath
     } catch {
         Write-Log ("Update install failed: {0}" -f $_.Exception.Message)
         Show-Message "Update failed." ([ConsoleColor]::Red)
-        return $false
+        return $null
     } finally {
         if (Test-Path $tempFile) {
             Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+function Start-UpdatedScript {
+    param([string]$ScriptPath)
+    if ([string]::IsNullOrWhiteSpace($ScriptPath)) { return }
+    if (-not (Test-Path $ScriptPath)) { return }
+    try {
+        if ($script:LaunchedFromFile -and $Host.Name -eq "ConsoleHost") {
+            Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", "`"$ScriptPath`"") | Out-Null
+        } else {
+            & $ScriptPath
+        }
+    } catch {
     }
 }
 
@@ -217,17 +249,23 @@ function Invoke-UpdateCheck {
     if ($null -eq $info) { return $false }
     if ([string]::IsNullOrWhiteSpace($info.Version)) { return $false }
     $latestVersion = $info.Version
-    if (Compare-VersionString -Current $CurrentVersion -Latest $latestVersion -ge 0) { return $false }
-    $downloadUrl = Resolve-UpdateTemplate -Value $info.Url -Version $latestVersion
+    $currentDisplay = ConvertTo-VersionString -Value $CurrentVersion
+    $latestDisplay = ConvertTo-VersionString -Value $latestVersion
+    if ([string]::IsNullOrWhiteSpace($currentDisplay) -or [string]::IsNullOrWhiteSpace($latestDisplay)) { return $false }
+    if (Compare-VersionString -Current $currentDisplay -Latest $latestDisplay -ge 0) { return $false }
+    $downloadUrl = Resolve-UpdateTemplate -Value $info.Url -Version $latestDisplay
     if ([string]::IsNullOrWhiteSpace($downloadUrl)) { return $false }
-    $subtitle = ("Current: {0}  Latest: {1}" -f $CurrentVersion, $latestVersion)
+    $subtitle = ("Current: {0}  Latest: {1}" -f $currentDisplay, $latestDisplay)
     $updateNow = $info.Mandatory
     if (-not $updateNow) {
         $choice = Show-ActionMenu -Title "Update available" -Options @("Update now", "Skip") -Subtitle $subtitle
         if ($choice -ne "Update now") { return $false }
     }
-    if (Install-Update -DownloadUrl $downloadUrl -LatestVersion $latestVersion) {
-        Stop-VaultX -Message "$script:AppName updated. Please restart."
+    $updatedPath = Install-Update -DownloadUrl $downloadUrl -LatestVersion $latestDisplay
+    if ($updatedPath) {
+        $script:SkipShellOnQuit = $true
+        Start-UpdatedScript -ScriptPath $updatedPath
+        Stop-VaultX -Message "$script:AppName updated."
         return $true
     }
     return $false
@@ -546,13 +584,17 @@ function Write-Header {
         [string]$Subtitle,
         [switch]$ShowBanner
     )
-    $greeting = "{0}@{1}" -f $env:USERNAME, $env:COMPUTERNAME
+    $hour = (Get-Date).Hour
+    $salutation = if ($hour -lt 12) { "Good morning" } elseif ($hour -lt 18) { "Good afternoon" } else { "Good evening" }
+    $greeting = "{0}, {1}." -f $salutation, $env:USERNAME
+    $hostLine = "Host: {0}" -f $env:COMPUTERNAME
     $titleLine = if ([string]::IsNullOrWhiteSpace($script:AppVersion)) {
         $script:AppName
     } else {
         "{0} v{1}" -f $script:AppName, $script:AppVersion
     }
     Write-Host $greeting -ForegroundColor DarkGray
+    Write-Host $hostLine -ForegroundColor DarkGray
     if ($ShowBanner) {
         Write-Banner
         Write-Host $titleLine -ForegroundColor DarkGray
@@ -1603,6 +1645,7 @@ function Stop-VaultX {
 
 function Start-InteractiveShellOnQuit {
     if ($script:IsDotSourced) { return }
+    if ($script:SkipShellOnQuit) { return }
     if (-not $script:LaunchedFromFile) { return }
     if ($Host.Name -ne "ConsoleHost") { return }
     try {
