@@ -340,13 +340,51 @@ function Test-VaultMeta {
 }
 
 function Write-Banner {
-    $lines = @(
-        "VV   VV   AAA   U   U  L     TTTTT  XX   XX",
-        "VV   VV  A   A  U   U  L       T     XX XX ",
-        "VV   VV  AAAAA  U   U  L       T      XXX  ",
-        " VVVVV   A   A  U   U  L       T     XX XX ",
-        "  VVV    A   A   UUU   LLLLL   T    XX   XX"
+    $v = @(
+        '\   /',
+        '\   /',
+        ' \ / ',
+        '  _  ',
+        '     '
     )
+    $a = @(
+        ' /-\ ',
+        '/   \ ',
+        '/---\ ',
+        '/   \ ',
+        '/   \ '
+    )
+    $u = @(
+        '[   ]',
+        '[   ]',
+        '[   ]',
+        '[   ]',
+        '[___]'
+    )
+    $l = @(
+        '[   ',
+        '[   ',
+        '[   ',
+        '[   ',
+        '[___'
+    )
+    $t = @(
+        '-----',
+        '  -  ',
+        '  -  ',
+        '  -  ',
+        '  -  '
+    )
+    $x = @(
+        '\   /',
+        ' \ / ',
+        '  /  ',
+        ' / \ ',
+        '/   \ '
+    )
+    $lines = for ($i = 0; $i -lt $v.Count; $i++) {
+        ($v[$i], $a[$i], $u[$i], $l[$i], $t[$i], "", $x[$i]) -join "  "
+    }
     foreach ($line in $lines) {
         Write-Host $line -ForegroundColor Cyan
     }
