@@ -474,7 +474,7 @@ function Set-ClipboardSafe {
     }
 }
 
-function Normalize-WebUrl {
+function ConvertTo-WebUrl {
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
     $trimmed = $Url.Trim()
@@ -492,7 +492,7 @@ function Normalize-WebUrl {
 
 function Open-WebUrl {
     param([string]$Url)
-    $normalized = Normalize-WebUrl -Url $Url
+    $normalized = ConvertTo-WebUrl -Url $Url
     if ([string]::IsNullOrWhiteSpace($normalized)) {
         Show-Message "URL is empty or invalid." ([ConsoleColor]::Yellow)
         return
