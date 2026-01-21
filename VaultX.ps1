@@ -50,19 +50,35 @@ function New-RandomBytes {
 }
 
 function Get-AppDir {
-    return (Join-Path $env:LOCALAPPDATA $script:AppName)
+    $root = $env:LOCALAPPDATA
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = $env:TEMP
+    }
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        return $null
+    }
+    return (Join-Path $root $script:AppName)
 }
 
 function Get-LogPath {
-    return (Join-Path (Get-AppDir) "vaultx.log")
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir)) {
+        $fallback = $env:TEMP
+        if ([string]::IsNullOrWhiteSpace($fallback)) {
+            $fallback = $PWD.Path
+        }
+        $dir = $fallback
+    }
+    return (Join-Path $dir "vaultx.log")
 }
 
 function Write-Log {
     param([string]$Message)
     try {
         $path = Get-LogPath
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
         $dir = Split-Path -Parent $path
-        if (-not (Test-Path $dir)) {
+        if ($dir -and -not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir | Out-Null
         }
         $stamp = (Get-Date).ToString("s")
