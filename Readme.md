@@ -1,25 +1,26 @@
-# VaultX Project Overview
+# VaultX
 
-VaultX is a local, single-user password manager implemented as a PowerShell script. It stores account vaults in JSON files under the user profile and encrypts entry data using AES with a password-derived key. The interface is a terminal-driven menu that lets you create accounts (vaults), unlock them with a master password, and manage entries for logins, URLs, and notes.
+TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON vaults live in your profile, managed through a clean terminal menu. Auto-detects new vault files dropped into the data folder. 🔐⚡
 
 ## Features
-- Local-only vaults stored under the user profile (no cloud sync).
-- Master password encryption with per-vault salt and key derivation.
-- Menu-driven UI to create, unlock, and delete accounts (vaults).
-- Entry management for usernames, passwords, URLs, and notes.
-- Optional search and quick clipboard copy for entry fields.
+- Local-only vaults stored under your user profile (no cloud sync).
+- AES encryption with per-vault salt and password-derived key.
+- Menu-driven UI with fast navigation and a reliable back option.
+- Add, view, edit, and delete entries for logins, URLs, and notes.
+- Search plus quick clipboard copy for entry fields.
+- Auto-refreshes when a new vault file is added to the data folder.
 
 ## How it Works
 1. Run `VaultX.ps1` to launch the main menu.
-2. Create or select an account (vault).
-3. Set or enter the master password to unlock the vault.
-4. Add, view, edit, or delete entries inside the vault.
-5. Log out to return to the account selection menu.
+2. Create or select a vault.
+3. Set or enter the master password to unlock it.
+4. Manage entries (add/view/edit/delete).
+5. Log out to return to the vault list.
 
 ## Files
-- `VaultX.ps1`: the main script and UI.
+- `VaultX.ps1`: main script and UI.
 - `ExecutionPolicy.md`: guidance for allowing script execution on Windows.
-- `Readme.md`: this project overview.
+- `Readme.md`: this overview.
 
 ## Notes
-VaultX is designed for local use. Keep your master password safe: it cannot be recovered if lost.
+VaultX is designed for local use. Keep your master password safe; it cannot be recovered if lost.
