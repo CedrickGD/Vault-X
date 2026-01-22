@@ -416,6 +416,38 @@ function Get-AccountNameFromFile {
     return $base
 }
 
+function Get-VaultFilesStamp {
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path $dir)) { return "0" }
+    $files = Get-ChildItem -Path $dir -Filter "vault_*.json" -File -ErrorAction SilentlyContinue
+    if ($null -eq $files -or $files.Count -eq 0) { return "0" }
+    $latest = ($files | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+    $ticks = if ($latest) { $latest.Ticks } else { 0 }
+    return ("{0}:{1}" -f $files.Count, $ticks)
+}
+
+function New-VaultFolderWatcher {
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir)) { return $null }
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+    }
+    $watcher = New-Object System.IO.FileSystemWatcher
+    $watcher.Path = $dir
+    $watcher.Filter = "vault_*.json"
+    $watcher.IncludeSubdirectories = $false
+    $watcher.NotifyFilter = [IO.NotifyFilters]::FileName -bor [IO.NotifyFilters]::LastWrite -bor [IO.NotifyFilters]::Size
+    $watcher.EnableRaisingEvents = $true
+    return $watcher
+}
+
+function Close-VaultFolderWatcher {
+    param($Watcher)
+    if ($null -eq $Watcher) { return }
+    try { $Watcher.EnableRaisingEvents = $false } catch { }
+    try { $Watcher.Dispose() } catch { }
+}
+
 function Sync-AccountsWithVaultFiles {
     param([array]$Accounts)
     if ($null -eq $Accounts) { $Accounts = @() }
@@ -485,21 +517,26 @@ function Remove-BrokenVaultFiles {
 }
 
 function Wipe-VaultCache {
+    param([switch]$Force, [switch]$Silent)
     $dir = Get-AppDir
     if ([string]::IsNullOrWhiteSpace($dir)) {
         Show-Message "Data folder unavailable." ([ConsoleColor]::Red)
         return $false
     }
-    if (-not (Confirm-Action "Wipe cache and remove broken vault files?")) { return $false }
+    if (-not $Force) {
+        if (-not (Confirm-Action "Wipe cache and remove broken vault files?")) { return $false }
+    }
     $cachePath = Get-AccountsPath
     if (Test-Path $cachePath) {
         Remove-Item -Path $cachePath -Force -ErrorAction SilentlyContinue
     }
     $removed = Remove-BrokenVaultFiles -Dir $dir
-    if ($removed -gt 0) {
-        Show-Message ("Cache cleared. Removed {0} broken vault file(s)." -f $removed) ([ConsoleColor]::Green)
-    } else {
-        Show-Message "Cache cleared." ([ConsoleColor]::Green)
+    if (-not $Silent) {
+        if ($removed -gt 0) {
+            Show-Message ("Cache cleared. Removed {0} broken vault file(s)." -f $removed) ([ConsoleColor]::Green)
+        } else {
+            Show-Message "Cache cleared." ([ConsoleColor]::Green)
+        }
     }
     return $true
 }
@@ -857,6 +894,63 @@ function Read-MenuKey {
     }
 }
 
+function Test-MenuKeyAvailable {
+    try {
+        if ($Host -and $Host.UI -and $Host.UI.RawUI) {
+            return $Host.UI.RawUI.KeyAvailable
+        }
+    } catch {
+    }
+    try {
+        return [Console]::KeyAvailable
+    } catch {
+        return $false
+    }
+}
+
+function Read-MenuKeyWithRefresh {
+    param(
+        [int]$RefreshIntervalMs = 700,
+        [scriptblock]$OnRefresh,
+        [System.IO.FileSystemWatcher]$Watcher,
+        [int]$ChangePollMs = 100,
+        [scriptblock]$OnChange
+    )
+    $hasRefresh = ($RefreshIntervalMs -gt 0 -and $null -ne $OnRefresh)
+    $hasChange = ($null -ne $Watcher -and $null -ne $OnChange)
+    if (-not $hasRefresh -and -not $hasChange) { return Read-MenuKey }
+    $lastRefresh = Get-Date
+    while ($true) {
+        if (Test-MenuKeyAvailable) {
+            return Read-MenuKey
+        }
+        $changeDetected = $false
+        if ($hasChange) {
+            try {
+                $timeout = [Math]::Max(10, $ChangePollMs)
+                $result = $Watcher.WaitForChanged([IO.WatcherChangeTypes]::All, $timeout)
+                if (-not $result.TimedOut) { $changeDetected = $true }
+            } catch {
+                $changeDetected = $false
+            }
+        } else {
+            Start-Sleep -Milliseconds 50
+        }
+        if ($changeDetected) {
+            $didRefresh = & $OnChange
+            if ($didRefresh) { return $null }
+        }
+        if ($hasRefresh) {
+            $now = Get-Date
+            if (($now - $lastRefresh).TotalMilliseconds -ge $RefreshIntervalMs) {
+                $lastRefresh = $now
+                $didRefresh = & $OnRefresh
+                if ($didRefresh) { return $null }
+            }
+        }
+    }
+}
+
 function Get-CursorVisible {
     try {
         return [Console]::CursorVisible
@@ -1088,7 +1182,7 @@ function Show-ActionMenu {
                 Write-MenuItem -Text $line -IsSelected $isSelected -Color $color -Align "Center"
             }
             Write-Host ""
-            Write-Host "Use Up/Down to move, Enter to select." -ForegroundColor DarkGray
+            Write-Host "Use Up/Down to move, Enter to select, Esc to go back." -ForegroundColor DarkGray
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1102,6 +1196,7 @@ function Show-ActionMenu {
                     }
                 }
                 "Enter" { return $Options[$Selected] }
+                "Escape" { return $null }
             }
         }
     } finally {
@@ -1276,6 +1371,8 @@ function Show-EntryList {
     )
     if ($Entries.Count -eq 0) { $SelectedIndex = 0 }
     $start = 0
+    $selectedPos = 0
+    $syncSelection = $true
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
@@ -1285,10 +1382,21 @@ function Show-EntryList {
             $filtered = $filterResult.Entries
             $map = $filterResult.Map
 
-            $selectedPos = 0
-            if ($map.Count -gt 0) {
-                $found = [Array]::IndexOf($map, $SelectedIndex)
-                if ($found -ge 0) { $selectedPos = $found + 1 }
+            if ($syncSelection) {
+                $selectedPos = 0
+                if ($map.Count -gt 0) {
+                    $found = [Array]::IndexOf($map, $SelectedIndex)
+                    if ($found -ge 0) { $selectedPos = $found + 1 } else { $selectedPos = 1 }
+                }
+                $syncSelection = $false
+            } else {
+                if ($map.Count -eq 0) {
+                    $selectedPos = 0
+                } elseif ($selectedPos -gt $map.Count) {
+                    $selectedPos = $map.Count
+                } elseif ($selectedPos -lt 0) {
+                    $selectedPos = 0
+                }
             }
 
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
@@ -1341,7 +1449,7 @@ function Show-EntryList {
             }
 
             Write-Host ""
-            Write-Host "Up/Down move, Enter select." -ForegroundColor DarkGray
+            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
             Write-Host "Type to search, Backspace delete." -ForegroundColor DarkGray
 
             $skipIndexUpdate = $false
@@ -1368,10 +1476,14 @@ function Show-EntryList {
                     }
                     Show-Message "No entries available." ([ConsoleColor]::Red)
                 }
+                "Escape" {
+                    return @{ Action = "back"; SelectedIndex = $SelectedIndex; SearchTerm = $SearchTerm }
+                }
                 "Backspace" {
                     if (-not [string]::IsNullOrEmpty($SearchTerm)) {
                         $SearchTerm = $SearchTerm.Substring(0, $SearchTerm.Length - 1)
                         $SelectedIndex = 0
+                        $syncSelection = $true
                         $skipIndexUpdate = $true
                     }
                 }
@@ -1379,6 +1491,7 @@ function Show-EntryList {
                     if ($key.Key.Length -eq 1 -and (($key.Modifiers -band [ConsoleModifiers]::Control) -eq 0) -and (($key.Modifiers -band [ConsoleModifiers]::Alt) -eq 0)) {
                         $SearchTerm += $key.Key
                         $SelectedIndex = 0
+                        $syncSelection = $true
                         $skipIndexUpdate = $true
                     }
                 }
@@ -1420,7 +1533,7 @@ function Show-AccountPicker {
             $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
             Write-MenuItem -Text "Back" -IsSelected $isSelected -Color $color -Indent 0
             Write-Host ""
-            Write-Host "Up/Down move, Enter select." -ForegroundColor DarkGray
+            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1435,6 +1548,7 @@ function Show-AccountPicker {
                     if ($selected -eq $backIndex) { return $null }
                     return $selected
                 }
+                "Escape" { return $null }
             }
         }
     } finally {
@@ -1475,7 +1589,7 @@ function Show-VaultMenu {
                 Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select." -ForegroundColor DarkGray
+            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1492,6 +1606,7 @@ function Show-VaultMenu {
                     }
                     return $action.Action
                 }
+                "Escape" { return "logout" }
             }
         }
     } finally {
@@ -1501,30 +1616,37 @@ function Show-VaultMenu {
 
 function Show-AccountMenu {
     param([array]$Accounts, [int]$Selected = 0)
-    $actions = @()
-    if ($Accounts.Count -gt 0) {
-        $actions += @{ Label = "Open existing"; Action = "login" }
-    }
-    $actions += @{ Label = "Create new"; Action = "add" }
-    if ($Accounts.Count -gt 0) {
-        $actions += @{ Label = "Remove"; Action = "delete" }
-    }
-    $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
-    $actions += @{ Label = "Open data folder (drag & drop)"; Action = "open-data" }
-    $actions += @{ Label = "Quit"; Action = "quit" }
-
+    $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
     $selectedAction = 0
     $cursorState = Get-CursorVisible
+    $watcher = New-VaultFolderWatcher
+    $vaultStamp = Get-VaultFilesStamp
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
         $isFirstRender = $true
         while ($true) {
+            $actions = @()
+            if ($accounts.Count -gt 0) {
+                $actions += @{ Label = "Open existing"; Action = "login" }
+            }
+            $actions += @{ Label = "Create new"; Action = "add" }
+            if ($accounts.Count -gt 0) {
+                $actions += @{ Label = "Remove"; Action = "delete" }
+            }
+            $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
+            $actions += @{ Label = "Open data folder (drag & drop)"; Action = "open-data" }
+            $actions += @{ Label = "Quit"; Action = "quit" }
+
+            if ($selectedAction -ge $actions.Count) {
+                $selectedAction = [Math]::Max(0, $actions.Count - 1)
+            }
+
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header "Main Menu" -ShowBanner
-            if ($Accounts.Count -eq 0) {
+            if ($accounts.Count -eq 0) {
                 Write-Host "No vaults yet." -ForegroundColor DarkGray
             } else {
-                $names = $Accounts | ForEach-Object { $_.Name } | Sort-Object
+                $names = $accounts | ForEach-Object { $_.Name } | Sort-Object
                 Write-Host ("Vaults: " + ($names -join ", ")) -ForegroundColor DarkGray
             }
             Write-Host ""
@@ -1536,8 +1658,25 @@ function Show-AccountMenu {
                 Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select." -ForegroundColor DarkGray
-            $key = Read-MenuKey
+            Write-Host "Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
+            $key = Read-MenuKeyWithRefresh -RefreshIntervalMs 700 -OnRefresh {
+                $currentStamp = Get-VaultFilesStamp
+                if ($currentStamp -ne $vaultStamp) {
+                    $vaultStamp = $currentStamp
+                    Wipe-VaultCache -Force -Silent | Out-Null
+                    $accounts = Sync-AccountsWithVaultFiles -Accounts @()
+                    $selectedAction = 0
+                    return $true
+                }
+                return $false
+            } -Watcher $watcher -ChangePollMs 100 -OnChange {
+                Wipe-VaultCache -Force -Silent | Out-Null
+                $accounts = Sync-AccountsWithVaultFiles -Accounts @()
+                $vaultStamp = Get-VaultFilesStamp
+                $selectedAction = 0
+                return $true
+            }
+            if ($null -eq $key) { continue }
             switch ($key.Key) {
                 "UpArrow" {
                     if ($selectedAction -gt 0) { $selectedAction-- } else { $selectedAction = $actions.Count - 1 }
@@ -1547,11 +1686,15 @@ function Show-AccountMenu {
                 }
                 "Enter" {
                     $action = $actions[$selectedAction]
-                    return @{ Action = $action.Action; Selected = 0 }
+                    return @{ Action = $action.Action; Selected = 0; Accounts = $accounts }
+                }
+                "Escape" {
+                    return @{ Action = "quit"; Selected = 0; Accounts = $accounts }
                 }
             }
         }
     } finally {
+        Close-VaultFolderWatcher -Watcher $watcher
         if ($null -ne $cursorState) { Set-CursorVisible $cursorState }
     }
 }
@@ -1591,7 +1734,7 @@ function Show-EntryDetail {
                 Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$true -Color $color
             }
             Write-Host ""
-            Write-Host "Enter copies field or runs action." -ForegroundColor DarkGray
+            Write-Host "Enter copies field or runs action, Esc go back." -ForegroundColor DarkGray
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1623,6 +1766,7 @@ function Show-EntryDetail {
                         return "back"
                     }
                 }
+                "Escape" { return "back" }
             }
         }
     } finally {
@@ -1868,6 +2012,7 @@ function Invoke-VaultX {
             $accounts = Sync-AccountsWithVaultFiles -Accounts $accounts
             $menu = Show-AccountMenu -Accounts $accounts -Selected $selectedAccount
             if ($null -eq $menu) { break }
+            if ($null -ne $menu.Accounts) { $accounts = $menu.Accounts }
             $selectedAccount = $menu.Selected
             switch ($menu.Action) {
                 "add" {
