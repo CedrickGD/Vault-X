@@ -23,6 +23,15 @@ $script:MenuSeparatorColor = [ConsoleColor]::DarkGray
 $script:MenuPromptColor = [ConsoleColor]::Gray
 $script:MenuPointerSymbol = ">"
 $script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
+$script:DefaultMenuNormalColor = $script:MenuNormalColor
+$script:DefaultMenuPromptColor = $script:MenuPromptColor
+$script:DefaultHostForegroundColor = $null
+try {
+    if ($Host -and $Host.UI -and $Host.UI.RawUI) {
+        $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
+    }
+} catch {
+}
 
 function Convert-SecureStringToPlain {
     param([Security.SecureString]$Secure)
@@ -1075,6 +1084,96 @@ function Show-MenuHelp {
     [void](Read-MenuKey)
 }
 
+function Get-ConsoleColorPalette {
+    return @(
+        @{ Name = "Black"; Color = [ConsoleColor]::Black; R = 0; G = 0; B = 0 }
+        @{ Name = "DarkBlue"; Color = [ConsoleColor]::DarkBlue; R = 0; G = 0; B = 139 }
+        @{ Name = "DarkGreen"; Color = [ConsoleColor]::DarkGreen; R = 0; G = 100; B = 0 }
+        @{ Name = "DarkCyan"; Color = [ConsoleColor]::DarkCyan; R = 0; G = 139; B = 139 }
+        @{ Name = "DarkRed"; Color = [ConsoleColor]::DarkRed; R = 139; G = 0; B = 0 }
+        @{ Name = "DarkMagenta"; Color = [ConsoleColor]::DarkMagenta; R = 139; G = 0; B = 139 }
+        @{ Name = "DarkYellow"; Color = [ConsoleColor]::DarkYellow; R = 184; G = 134; B = 11 }
+        @{ Name = "Gray"; Color = [ConsoleColor]::Gray; R = 190; G = 190; B = 190 }
+        @{ Name = "DarkGray"; Color = [ConsoleColor]::DarkGray; R = 105; G = 105; B = 105 }
+        @{ Name = "Blue"; Color = [ConsoleColor]::Blue; R = 0; G = 0; B = 255 }
+        @{ Name = "Green"; Color = [ConsoleColor]::Green; R = 0; G = 255; B = 0 }
+        @{ Name = "Cyan"; Color = [ConsoleColor]::Cyan; R = 0; G = 255; B = 255 }
+        @{ Name = "Red"; Color = [ConsoleColor]::Red; R = 255; G = 0; B = 0 }
+        @{ Name = "Magenta"; Color = [ConsoleColor]::Magenta; R = 255; G = 0; B = 255 }
+        @{ Name = "Yellow"; Color = [ConsoleColor]::Yellow; R = 255; G = 255; B = 0 }
+        @{ Name = "White"; Color = [ConsoleColor]::White; R = 255; G = 255; B = 255 }
+    )
+}
+
+function Resolve-ConsoleColor {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $trimmed = $Value.Trim()
+    if ($trimmed -match "^(?i)#?[0-9a-f]{6}$") {
+        $hex = $trimmed.TrimStart("#")
+        $r = [Convert]::ToInt32($hex.Substring(0, 2), 16)
+        $g = [Convert]::ToInt32($hex.Substring(2, 2), 16)
+        $b = [Convert]::ToInt32($hex.Substring(4, 2), 16)
+        $palette = Get-ConsoleColorPalette
+        $closest = $palette | Sort-Object { ($_.R - $r) * ($_.R - $r) + ($_.G - $g) * ($_.G - $g) + ($_.B - $b) * ($_.B - $b) } | Select-Object -First 1
+        return $closest.Color
+    }
+    if ($trimmed -match "^\d+$") {
+        $num = 0
+        if ([int]::TryParse($trimmed, [ref]$num)) {
+            if ($num -ge 0 -and $num -le 15) {
+                return ([ConsoleColor]$num)
+            }
+        }
+    }
+    try {
+        return [ConsoleColor]([Enum]::Parse([ConsoleColor], $trimmed, $true))
+    } catch {
+        return $null
+    }
+}
+
+function Set-FontColor {
+    param([ConsoleColor]$Color)
+    $script:MenuNormalColor = $Color
+    $script:MenuPromptColor = $Color
+    try {
+        if ($Host -and $Host.UI -and $Host.UI.RawUI) {
+            $Host.UI.RawUI.ForegroundColor = $Color
+        }
+    } catch {
+    }
+}
+
+function Reset-CustomizationDefaults {
+    $script:MenuNormalColor = $script:DefaultMenuNormalColor
+    $script:MenuPromptColor = $script:DefaultMenuPromptColor
+    try {
+        if ($Host -and $Host.UI -and $Host.UI.RawUI -and $null -ne $script:DefaultHostForegroundColor) {
+            $Host.UI.RawUI.ForegroundColor = $script:DefaultHostForegroundColor
+        }
+    } catch {
+    }
+}
+
+function Invoke-FontColorPrompt {
+    Clear-Host
+    Write-Header "Customize Script"
+    Write-Host "Enter a color name (e.g., Cyan), number (0-15), or hex (#RRGGBB)." -ForegroundColor DarkGray
+    $names = [Enum]::GetNames([ConsoleColor]) -join ", "
+    Write-Host ("Available colors: " + $names) -ForegroundColor DarkGray
+    Write-Host ""
+    $input = Read-Host "Font color"
+    $color = Resolve-ConsoleColor -Value $input
+    if ($null -eq $color) {
+        Show-Message "Invalid color value." ([ConsoleColor]::Red)
+        return $false
+    }
+    Set-FontColor -Color $color
+    Show-Message ("Font color set to " + $color + ".") ([ConsoleColor]::Green)
+    return $true
+}
+
 function Format-MenuText {
     param([string]$Text, [int]$Max)
     if ([string]::IsNullOrEmpty($Text)) { return "" }
@@ -1614,6 +1713,64 @@ function Show-VaultMenu {
     }
 }
 
+function Show-CustomizeMenu {
+    $selectedAction = 0
+    $cursorState = Get-CursorVisible
+    if ($null -ne $cursorState) { Set-CursorVisible $false }
+    try {
+        $isFirstRender = $true
+        while ($true) {
+            $actions = @(
+                @{ Label = "Change font color"; Action = "font-color" }
+                @{ Label = "Reset to script defaults"; Action = "reset" }
+                @{ Label = "Back"; Action = "back" }
+            )
+            if ($selectedAction -ge $actions.Count) {
+                $selectedAction = [Math]::Max(0, $actions.Count - 1)
+            }
+
+            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
+            Write-Header "Customize Script"
+            Write-Host ("Current font color: " + $script:MenuNormalColor) -ForegroundColor DarkGray
+            Write-Host ""
+            Write-MenuSeparator -Indent 0
+            for ($i = 0; $i -lt $actions.Count; $i++) {
+                $action = $actions[$i]
+                $isSelected = ($i -eq $selectedAction)
+                $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
+                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
+            }
+            Write-Host ""
+            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
+            $key = Read-MenuKey
+            switch ($key.Key) {
+                "UpArrow" {
+                    if ($selectedAction -gt 0) { $selectedAction-- } else { $selectedAction = $actions.Count - 1 }
+                }
+                "DownArrow" {
+                    if ($selectedAction -lt ($actions.Count - 1)) { $selectedAction++ } else { $selectedAction = 0 }
+                }
+                "Enter" {
+                    $action = $actions[$selectedAction].Action
+                    if ($action -eq "font-color") {
+                        Invoke-FontColorPrompt | Out-Null
+                        $isFirstRender = $true
+                    } elseif ($action -eq "reset") {
+                        Reset-CustomizationDefaults
+                        Show-Message "Customizations reset to script defaults." ([ConsoleColor]::Green)
+                        $isFirstRender = $true
+                    } else {
+                        return "back"
+                    }
+                }
+                "Escape" { return "back" }
+            }
+        }
+    } finally {
+        if ($null -ne $cursorState) { Set-CursorVisible $cursorState }
+    }
+}
+
 function Show-AccountMenu {
     param([array]$Accounts, [int]$Selected = 0)
     $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
@@ -1635,6 +1792,7 @@ function Show-AccountMenu {
             }
             $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
             $actions += @{ Label = "Open data folder (drag & drop)"; Action = "open-data" }
+            $actions += @{ Label = "Customize script"; Action = "customize" }
             $actions += @{ Label = "Quit"; Action = "quit" }
 
             if ($selectedAction -ge $actions.Count) {
@@ -2046,6 +2204,9 @@ function Invoke-VaultX {
                 }
                 "open-data" {
                     Open-AppDataFolder | Out-Null
+                }
+                "customize" {
+                    Show-CustomizeMenu | Out-Null
                 }
                 "wipe-cache" {
                     if (Wipe-VaultCache) {
