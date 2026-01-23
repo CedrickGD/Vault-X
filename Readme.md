@@ -9,6 +9,8 @@ TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON
 - Add, view, edit, and delete entries for logins, URLs, and notes.
 - Search plus quick clipboard copy for entry fields.
 - Auto-refreshes when a new vault file is added to the data folder.
+- Export and import encrypted vaults for local migration between machines.
+- Optional recovery password to unlock vaults locally if the master password is lost.
 
 ## How it Works
 1. Run `VaultX.ps1` to launch the main menu.
@@ -23,4 +25,4 @@ TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON
 - `Readme.md`: this overview.
 
 ## Notes
-VaultX is designed for local use. Keep your master password safe; it cannot be recovered if lost.
+VaultX is designed for local use. If you do not set a recovery password, a lost master password cannot be recovered.

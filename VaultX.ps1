@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script:AppName = "VaultX"
-$script:AppVersion = "1.0.2"
+$script:AppVersion = "1.0.3"
 $script:UpdateConfigUrl = "https://raw.githubusercontent.com/CedrickGD/Vault-X/main/version.yml"
 $script:UpdateCheckEnabled = ($env:VAULTX_UPDATE_CHECK -ne "0")
 $script:SkipShellOnQuit = $false
@@ -609,6 +609,86 @@ function Remove-Account {
     return $updated
 }
 
+function Export-VaultData {
+    param(
+        [string]$AccountName,
+        $VaultData
+    )
+    Clear-Host
+    Write-Header "Export vault"
+    $destination = Read-Host "Export file path (Enter to abort)"
+    if ([string]::IsNullOrWhiteSpace($destination)) { return $false }
+    $extension = [IO.Path]::GetExtension($destination)
+    if ([string]::IsNullOrWhiteSpace($extension)) {
+        $destination = "$destination.json"
+    }
+    $exportPassword = Read-ConfirmedSecret -Title "Export vault" -Prompt "Create export password" -ConfirmPrompt "Confirm export password"
+    if ([string]::IsNullOrEmpty($exportPassword)) { return $false }
+    $salt = New-RandomBytes 16
+    $iterations = 100000
+    $key = Get-KeyFromPassword -Password $exportPassword -Salt $salt -Iterations $iterations
+    $meta = [ordered]@{
+        Version = 1
+        AccountName = $AccountName
+        Salt = [Convert]::ToBase64String($salt)
+        Iterations = $iterations
+        IV = ""
+        Data = ""
+    }
+    Save-Vault -VaultPath $destination -Key $key -Meta $meta -Data $VaultData
+    Show-Message "Vault exported." ([ConsoleColor]::Green)
+    return $true
+}
+
+function Import-VaultData {
+    param([array]$Accounts)
+    $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
+    Clear-Host
+    Write-Header "Import vault"
+    $path = Read-Host "Path to exported vault (Enter to abort)"
+    if ([string]::IsNullOrWhiteSpace($path)) { return @{ Accounts = $accounts; Imported = $false } }
+    if (-not (Test-Path $path)) {
+        Show-Message "Import file not found." ([ConsoleColor]::Red)
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+    try {
+        $meta = Get-Content -Path $path -Raw | ConvertFrom-Json
+    } catch {
+        Show-Message "Import file is corrupted or unreadable." ([ConsoleColor]::Red)
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+    if (-not (Test-VaultMeta -Meta $meta)) {
+        Show-Message "Import file is not a valid vault." ([ConsoleColor]::Red)
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+    $baseName = $meta.AccountName
+    if ([string]::IsNullOrWhiteSpace($baseName)) {
+        $baseName = Get-AccountNameFromFile -FileName ([IO.Path]::GetFileName($path))
+    }
+    $name = Get-UniqueAccountName -Accounts $accounts -BaseName $baseName
+    $fileName = Get-AccountFileName -AccountName $name
+    $destination = Get-VaultPath -FileName $fileName
+    if (Test-Path $destination) {
+        Show-Message "Vault already exists. Import aborted." ([ConsoleColor]::Red)
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+    $meta.AccountName = $name
+    $json = $meta | ConvertTo-Json -Depth 6
+    $dir = Split-Path -Parent $destination
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+    }
+    Set-Content -Path $destination -Value $json -Encoding UTF8
+    $accounts += [ordered]@{
+        Name = $name
+        File = $fileName
+        CreatedAt = (Get-Date).ToString("s")
+    }
+    Save-Accounts -Accounts $accounts
+    Show-Message ("Imported vault '{0}'." -f $name) ([ConsoleColor]::Green)
+    return @{ Accounts = $accounts; Imported = $true }
+}
+
 function Confirm-AccountPassword {
     param([string]$VaultPath, [string]$AccountName)
     if (-not (Test-Path $VaultPath)) {
@@ -632,6 +712,7 @@ function Confirm-AccountPassword {
         return $false
     }
     $iterations = [int]$meta.Iterations
+    $recoveryAvailable = Test-RecoveryMeta -Meta $meta
     while ($true) {
         Clear-Host
         Write-Header "Confirm deletion"
@@ -648,6 +729,27 @@ function Confirm-AccountPassword {
             return $true
         } catch {
             Show-Message "Invalid password." ([ConsoleColor]::Red)
+            if ($recoveryAvailable) {
+                $choice = Show-ActionMenu -Title "Password check failed" -Options @("Try again", "Use recovery password", "Abort") -Subtitle "A recovery password is configured for this vault."
+                if ($choice -eq "Use recovery password") {
+                    $recoveryPassword = Read-SecurePlain "Recovery password (Enter to abort)"
+                    if ([string]::IsNullOrEmpty($recoveryPassword)) { return $false }
+                    $masterKey = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
+                    $recoveryPassword = $null
+                    if ($null -eq $masterKey) {
+                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                        continue
+                    }
+                    try {
+                        $null = Get-DataFromMeta -Meta $meta -Key $masterKey
+                        return $true
+                    } catch {
+                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                    }
+                } elseif ($null -eq $choice -or $choice -eq "Abort") {
+                    return $false
+                }
+            }
         } finally {
             $password = $null
         }
@@ -1328,6 +1430,80 @@ function Read-NewMasterPassword {
     }
 }
 
+function Read-ConfirmedSecret {
+    param(
+        [string]$Title,
+        [string]$Prompt,
+        [string]$ConfirmPrompt
+    )
+    while ($true) {
+        Clear-Host
+        Write-Header $Title
+        $pw1 = Read-SecurePlain "$Prompt (Enter to abort)"
+        if ([string]::IsNullOrEmpty($pw1)) { return $null }
+        $pw2 = Read-SecurePlain "$ConfirmPrompt (Enter to abort)"
+        if ([string]::IsNullOrEmpty($pw2)) { return $null }
+        if ($pw1 -ne $pw2) {
+            Show-Message "Passwords do not match." ([ConsoleColor]::Red)
+            $pw1 = $null
+            $pw2 = $null
+            continue
+        }
+        return $pw1
+    }
+}
+
+function Test-RecoveryMeta {
+    param($Meta)
+    if ($null -eq $Meta) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Meta.RecoverySalt)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Meta.RecoveryKeyIV)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Meta.RecoveryKeyData)) { return $false }
+    if ($null -eq $Meta.RecoveryIterations) { return $false }
+    $iterValue = 0
+    if (-not [int]::TryParse($Meta.RecoveryIterations.ToString(), [ref]$iterValue)) { return $false }
+    if ($iterValue -le 0) { return $false }
+    try { [Convert]::FromBase64String($Meta.RecoverySalt) | Out-Null } catch { return $false }
+    try { [Convert]::FromBase64String($Meta.RecoveryKeyIV) | Out-Null } catch { return $false }
+    try { [Convert]::FromBase64String($Meta.RecoveryKeyData) | Out-Null } catch { return $false }
+    return $true
+}
+
+function Get-MasterKeyFromRecovery {
+    param(
+        $Meta,
+        [string]$RecoveryPassword
+    )
+    if (-not (Test-RecoveryMeta -Meta $Meta)) { return $null }
+    try {
+        $salt = [Convert]::FromBase64String($Meta.RecoverySalt)
+        $iterations = [int]$Meta.RecoveryIterations
+        $recoveryKey = Get-KeyFromPassword -Password $RecoveryPassword -Salt $salt -Iterations $iterations
+        $iv = [Convert]::FromBase64String($Meta.RecoveryKeyIV)
+        $cipher = [Convert]::FromBase64String($Meta.RecoveryKeyData)
+        $masterKey = Unprotect-Bytes -CipherBytes $cipher -Key $recoveryKey -IV $iv
+        return $masterKey
+    } catch {
+        return $null
+    }
+}
+
+function Remove-RecoveryFields {
+    param($Meta)
+    if ($null -eq $Meta) { return }
+    if ($Meta -is [System.Collections.IDictionary]) {
+        $Meta.Remove("RecoverySalt") | Out-Null
+        $Meta.Remove("RecoveryIterations") | Out-Null
+        $Meta.Remove("RecoveryKeyIV") | Out-Null
+        $Meta.Remove("RecoveryKeyData") | Out-Null
+        return
+    }
+    $Meta.PSObject.Properties.Remove("RecoverySalt")
+    $Meta.PSObject.Properties.Remove("RecoveryIterations")
+    $Meta.PSObject.Properties.Remove("RecoveryKeyIV")
+    $Meta.PSObject.Properties.Remove("RecoveryKeyData")
+}
+
 function Open-Vault {
     param(
         [string]$VaultPath,
@@ -1379,6 +1555,7 @@ function Open-Vault {
         return $null
     }
     $iterations = [int]$meta.Iterations
+    $recoveryAvailable = Test-RecoveryMeta -Meta $meta
     while ($true) {
         Clear-Host
         $title = "Unlock vault"
@@ -1397,9 +1574,77 @@ function Open-Vault {
             }
         } catch {
             Show-Message "Invalid password." ([ConsoleColor]::Red)
+            if ($recoveryAvailable) {
+                $choice = Show-ActionMenu -Title "Unlock failed" -Options @("Try again", "Use recovery password", "Abort") -Subtitle "A recovery password is configured for this vault."
+                if ($choice -eq "Use recovery password") {
+                    $recoveryPassword = Read-SecurePlain "Recovery password (Enter to abort)"
+                    if ([string]::IsNullOrEmpty($recoveryPassword)) { return $null }
+                    $masterKey = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
+                    $recoveryPassword = $null
+                    if ($null -eq $masterKey) {
+                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                        continue
+                    }
+                    try {
+                        $data = Get-DataFromMeta -Meta $meta -Key $masterKey
+                        return @{
+                            Meta = $meta
+                            Data = $data
+                            Key  = $masterKey
+                        }
+                    } catch {
+                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                    }
+                } elseif ($null -eq $choice -or $choice -eq "Abort") {
+                    return $null
+                }
+            }
         } finally {
             $password = $null
         }
+    }
+}
+
+function Invoke-RecoveryOptions {
+    param(
+        [string]$VaultPath,
+        [string]$AccountName,
+        $Meta,
+        $Data,
+        [byte[]]$Key
+    )
+    while ($true) {
+        $hasRecovery = Test-RecoveryMeta -Meta $Meta
+        $options = if ($hasRecovery) {
+            @("Update recovery password", "Remove recovery password", "Back")
+        } else {
+            @("Set recovery password", "Back")
+        }
+        $subtitle = "Recovery passwords let you unlock this vault if the master password is lost."
+        $choice = Show-ActionMenu -Title "Recovery options" -Options $options -Subtitle $subtitle
+        if ($null -eq $choice -or $choice -eq "Back") { return $false }
+        if ($choice -eq "Remove recovery password") {
+            if (-not (Confirm-Action "Remove recovery password for this vault?")) { return $false }
+            Remove-RecoveryFields -Meta $Meta
+            Save-Vault -VaultPath $VaultPath -Key $Key -Meta $Meta -Data $Data
+            Show-Message "Recovery password removed." ([ConsoleColor]::Green)
+            return $true
+        }
+        $title = if ($AccountName) { "Set recovery password for vault $AccountName" } else { "Set recovery password" }
+        $recoveryPassword = Read-ConfirmedSecret -Title $title -Prompt "Create recovery password" -ConfirmPrompt "Confirm recovery password"
+        if ([string]::IsNullOrEmpty($recoveryPassword)) { return $false }
+        $salt = New-RandomBytes 16
+        $iterations = 100000
+        $recoveryKey = Get-KeyFromPassword -Password $recoveryPassword -Salt $salt -Iterations $iterations
+        $wrapped = Protect-Bytes -PlainBytes $Key -Key $recoveryKey
+        $Meta.RecoverySalt = [Convert]::ToBase64String($salt)
+        $Meta.RecoveryIterations = $iterations
+        $Meta.RecoveryKeyIV = $wrapped.IV
+        $Meta.RecoveryKeyData = $wrapped.Data
+        Save-Vault -VaultPath $VaultPath -Key $Key -Meta $Meta -Data $Data
+        $recoveryPassword = $null
+        Show-Message "Recovery password saved." ([ConsoleColor]::Green)
+        return $true
     }
 }
 
@@ -1669,6 +1914,8 @@ function Show-VaultMenu {
         @{ Label = "Add entry"; Action = "add"; RequiresEntry = $false }
         @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
         @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
+        @{ Label = "Export vault (encrypted)"; Action = "export"; RequiresEntry = $false }
+        @{ Label = "Recovery options"; Action = "recovery"; RequiresEntry = $false }
         @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
         @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
     )
@@ -1791,6 +2038,7 @@ function Show-AccountMenu {
                 $actions += @{ Label = "Open existing"; Action = "login" }
             }
             $actions += @{ Label = "Create new"; Action = "add" }
+            $actions += @{ Label = "Import vault (encrypted)"; Action = "import" }
             if ($accounts.Count -gt 0) {
                 $actions += @{ Label = "Remove"; Action = "delete" }
             }
@@ -2103,6 +2351,12 @@ function Invoke-VaultSession {
                         }
                     }
                 }
+                "export" {
+                    Export-VaultData -AccountName $script:VaultMeta.AccountName -VaultData $script:VaultData | Out-Null
+                }
+                "recovery" {
+                    Invoke-RecoveryOptions -VaultPath $VaultPath -AccountName $script:VaultMeta.AccountName -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey | Out-Null
+                }
                 "logout" { break VaultSession }
                 "quit" {
                     Stop-VaultX -Message "$script:AppName closed."
@@ -2204,6 +2458,13 @@ function Invoke-VaultX {
                         if ($null -ne $vault) {
                             Invoke-VaultSession -VaultPath $vaultPath -Vault $vault
                         }
+                    }
+                }
+                "import" {
+                    $result = Import-VaultData -Accounts $accounts
+                    if ($null -ne $result -and $null -ne $result.Accounts) {
+                        $accounts = $result.Accounts
+                        $selectedAccount = [Math]::Max(0, $accounts.Count - 1)
                     }
                 }
                 "open-data" {
