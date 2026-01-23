@@ -644,7 +644,18 @@ function Import-VaultData {
     param([array]$Accounts)
     $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
     Clear-Host
-    Write-Header "Import vault"
+    Write-Header "Import data"
+    $choice = Show-ActionMenu -Title "Import data" -Options @("Open data folder", "Enter file path", "Back") -Subtitle "Copy an exported vault file into the data folder or select its path."
+    if ($null -eq $choice -or $choice -eq "Back") {
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+    if ($choice -eq "Open data folder") {
+        Open-AppDataFolder | Out-Null
+        $choice = Show-ActionMenu -Title "Import data" -Options @("Enter file path", "Back") -Subtitle "When ready, enter the exported vault file path."
+        if ($null -eq $choice -or $choice -eq "Back") {
+            return @{ Accounts = $accounts; Imported = $false }
+        }
+    }
     $path = Read-Host "Path to exported vault (Enter to abort)"
     if ([string]::IsNullOrWhiteSpace($path)) { return @{ Accounts = $accounts; Imported = $false } }
     if (-not (Test-Path $path)) {
@@ -2038,12 +2049,12 @@ function Show-AccountMenu {
                 $actions += @{ Label = "Open existing"; Action = "login" }
             }
             $actions += @{ Label = "Create new"; Action = "add" }
-            $actions += @{ Label = "Import vault (encrypted)"; Action = "import" }
+            $actions += @{ Label = "Import data"; Action = "import" }
             if ($accounts.Count -gt 0) {
                 $actions += @{ Label = "Remove"; Action = "delete" }
             }
             $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
-            $actions += @{ Label = "Open data folder (drag & drop)"; Action = "open-data" }
+            $actions += @{ Label = "Open data folder"; Action = "open-data" }
             $actions += @{ Label = "Customize script"; Action = "customize" }
             $actions += @{ Label = "Quit"; Action = "quit" }
 
