@@ -52,6 +52,16 @@ function Read-SecurePlain {
     return Convert-SecureStringToPlain $secure
 }
 
+function Test-PathSafe {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    try {
+        return (Test-Path -LiteralPath $Path)
+    } catch {
+        return $false
+    }
+}
+
 function New-RandomBytes {
     param([int]$Length)
     $bytes = New-Object byte[] $Length
@@ -618,9 +628,18 @@ function Export-VaultData {
     Write-Header "Export vault"
     $destination = Read-Host "Export file path (Enter to abort)"
     if ([string]::IsNullOrWhiteSpace($destination)) { return $false }
+    $destination = $destination.Trim()
     $extension = [IO.Path]::GetExtension($destination)
     if ([string]::IsNullOrWhiteSpace($extension)) {
         $destination = "$destination.json"
+    }
+    $destinationDir = Split-Path -Parent $destination
+    if ([string]::IsNullOrWhiteSpace($destinationDir)) {
+        $destinationDir = $PWD.Path
+    }
+    if (-not (Test-PathSafe -Path $destinationDir)) {
+        Show-Message "Export path is invalid." ([ConsoleColor]::Red)
+        return $false
     }
     $exportPassword = Read-ConfirmedSecret -Title "Export vault" -Prompt "Create export password" -ConfirmPrompt "Confirm export password"
     if ([string]::IsNullOrEmpty($exportPassword)) { return $false }
@@ -658,12 +677,13 @@ function Import-VaultData {
     }
     $path = Read-Host "Path to exported vault (Enter to abort)"
     if ([string]::IsNullOrWhiteSpace($path)) { return @{ Accounts = $accounts; Imported = $false } }
-    if (-not (Test-Path $path)) {
-        Show-Message "Import file not found." ([ConsoleColor]::Red)
+    $path = $path.Trim()
+    if (-not (Test-PathSafe -Path $path)) {
+        Show-Message "Import file path is invalid or not found." ([ConsoleColor]::Red)
         return @{ Accounts = $accounts; Imported = $false }
     }
     try {
-        $meta = Get-Content -Path $path -Raw | ConvertFrom-Json
+        $meta = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
     } catch {
         Show-Message "Import file is corrupted or unreadable." ([ConsoleColor]::Red)
         return @{ Accounts = $accounts; Imported = $false }
@@ -1624,6 +1644,10 @@ function Invoke-RecoveryOptions {
         $Data,
         [byte[]]$Key
     )
+    if ($null -eq $Key -or $Key.Length -ne 32) {
+        Show-Message "Recovery options unavailable for this vault session." ([ConsoleColor]::Red)
+        return $false
+    }
     while ($true) {
         $hasRecovery = Test-RecoveryMeta -Meta $Meta
         $options = if ($hasRecovery) {
