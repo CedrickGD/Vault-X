@@ -21,10 +21,12 @@ $script:MenuHighlightColor = [ConsoleColor]::Cyan
 $script:MenuDisabledColor = [ConsoleColor]::DarkGray
 $script:MenuSeparatorColor = [ConsoleColor]::DarkGray
 $script:MenuPromptColor = [ConsoleColor]::Gray
+$script:MenuBannerColor = [ConsoleColor]::Cyan
 $script:MenuPointerSymbol = ">"
 $script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
 $script:DefaultMenuNormalColor = $script:MenuNormalColor
 $script:DefaultMenuPromptColor = $script:MenuPromptColor
+$script:DefaultMenuBannerColor = $script:MenuBannerColor
 $script:DefaultHostForegroundColor = $null
 try {
     if ($Host -and $Host.UI -and $Host.UI.RawUI) {
@@ -797,7 +799,7 @@ ____   _________   ____ ___.____  ___________           ____  ___
         $lines = $banner -split "\r?\n"
         foreach ($line in $lines) {
             if ($line -ne "") {
-                Write-Host $line -ForegroundColor Cyan
+                Write-Host $line -ForegroundColor $script:MenuBannerColor
             }
         }
     } catch {
@@ -1137,6 +1139,7 @@ function Set-FontColor {
     param([ConsoleColor]$Color)
     $script:MenuNormalColor = $Color
     $script:MenuPromptColor = $Color
+    $script:MenuBannerColor = $Color
     try {
         if ($Host -and $Host.UI -and $Host.UI.RawUI) {
             $Host.UI.RawUI.ForegroundColor = $Color
@@ -1148,6 +1151,7 @@ function Set-FontColor {
 function Reset-CustomizationDefaults {
     $script:MenuNormalColor = $script:DefaultMenuNormalColor
     $script:MenuPromptColor = $script:DefaultMenuPromptColor
+    $script:MenuBannerColor = $script:DefaultMenuBannerColor
     try {
         if ($Host -and $Host.UI -and $Host.UI.RawUI -and $null -ne $script:DefaultHostForegroundColor) {
             $Host.UI.RawUI.ForegroundColor = $script:DefaultHostForegroundColor
