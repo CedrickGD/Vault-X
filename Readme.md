@@ -10,8 +10,9 @@ TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON
 - Search plus quick clipboard copy for entry fields.
 - Auto-refreshes when a new vault file is added to the data folder.
 - Export and import encrypted vaults for local migration between machines.
+- Import browser CSV exports into entries.
+- Customizable UI colors (names or hex) with persistent settings + reset.
 - Optional recovery password to unlock vaults locally if the master password is lost.
-  - Import data lets you open the data folder or enter a file path manually.
 
 ## How it Works
 1. Run `VaultX.ps1` to launch the main menu.
