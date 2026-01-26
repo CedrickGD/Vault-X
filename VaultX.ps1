@@ -1579,7 +1579,7 @@ function Show-ActionMenu {
                 Write-MenuItem -Text $line -IsSelected $isSelected -Color $color -Align "Center"
             }
             Write-Host ""
-            Write-Host "Use Up/Down to move, Enter to select, Esc to go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[↑/↓] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1993,8 +1993,8 @@ function Show-EntryList {
             }
 
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
-            Write-Host "Type to search, Backspace delete." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[↑/↓] Move  [Enter] Select  [Esc] Back"
+            Write-MenuHelpHint "[Type] Search  [Backspace] Delete"
 
             $skipIndexUpdate = $false
             $key = Read-MenuKey
@@ -2077,7 +2077,7 @@ function Show-AccountPicker {
             $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
             Write-MenuItem -Text "Back" -IsSelected $isSelected -Color $color -Indent 0
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[↑/↓] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2160,7 +2160,7 @@ function Show-VaultMenu {
                 Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[↑/↓] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2235,7 +2235,7 @@ function Show-CustomizeMenu {
                 Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[↑/↓] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2332,7 +2332,7 @@ function Show-AccountMenu {
                 Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[↑/↓] Move  [Enter] Select  [Esc] Quit"
             $key = Read-MenuKeyWithRefresh -RefreshIntervalMs 700 -OnRefresh {
                 $currentStamp = Get-VaultFilesStamp
                 if ($currentStamp -ne $vaultStamp) {
@@ -2427,7 +2427,7 @@ function Show-EntryDetail {
                 Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$true -Color $color
             }
             Write-Host ""
-            Write-Host "Enter copies field or runs action, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[↑/↓] Move  [Enter] Copy/Action  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
