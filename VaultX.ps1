@@ -1501,15 +1501,9 @@ function Get-MenuBlockWidth {
 
 function Start-MenuFrame {
     param([ref]$IsFirstRender)
+    Clear-Host
     if ($IsFirstRender.Value) {
-        Clear-Host
         $IsFirstRender.Value = $false
-        return
-    }
-    try {
-        [Console]::SetCursorPosition(0, 0)
-    } catch {
-        Clear-Host
     }
 }
 
