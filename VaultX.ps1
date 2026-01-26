@@ -2089,18 +2089,17 @@ function Show-VaultMenu {
     $actions = @(
         @{ Label = "View entries"; Action = "view"; RequiresEntry = $false }
         @{ Label = "Add entry"; Action = "add"; RequiresEntry = $false }
+        @{ Label = "Import browser CSV"; Action = "import-browser"; RequiresEntry = $false }
+        @{ Label = "Browser export links"; Action = "browser-links"; RequiresEntry = $false }
         @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
         @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
-        @{ Label = "Export vault (encrypted)"; Action = "export"; RequiresEntry = $false }
-        @{ Label = "Import browser passwords (CSV)"; Action = "import-browser"; RequiresEntry = $false }
-        @{ Label = "Get browser CSV export links"; Action = "browser-links"; RequiresEntry = $false }
+        @{ Label = "Export vault"; Action = "export"; RequiresEntry = $false }
         @{ Label = "Recovery options"; Action = "recovery"; RequiresEntry = $false }
         @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
         @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
     )
     $labels = $actions | ForEach-Object { $_.Label }
     $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
-    $menuWidth = Get-MenuBlockWidth -Items $labels -MinWidth 26 -MaxWidth 60
     $selected = 0
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
@@ -2119,7 +2118,7 @@ function Show-VaultMenu {
                 $isDisabled = ($action.RequiresEntry -and -not $HasEntries)
                 $isSelected = ($i -eq $selected)
                 $color = if ($isDisabled) { $script:MenuDisabledColor } elseif ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0 -BlockWidth $menuWidth
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0
             }
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
@@ -2156,12 +2155,11 @@ function Show-CustomizeMenu {
         while ($true) {
             $actions = @(
                 @{ Label = "Change font color"; Action = "font-color" }
-                @{ Label = "Reset to script defaults"; Action = "reset" }
+                @{ Label = "Reset to defaults"; Action = "reset" }
                 @{ Label = "Back"; Action = "back" }
             )
             $labels = $actions | ForEach-Object { $_.Label }
             $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
-            $menuWidth = Get-MenuBlockWidth -Items $labels -MinWidth 24 -MaxWidth 60
             if ($selectedAction -ge $actions.Count) {
                 $selectedAction = [Math]::Max(0, $actions.Count - 1)
             }
@@ -2176,7 +2174,7 @@ function Show-CustomizeMenu {
                 $label = $action.Label.PadRight($labelWidth)
                 $isSelected = ($i -eq $selectedAction)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0 -BlockWidth $menuWidth
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
@@ -2222,20 +2220,19 @@ function Show-AccountMenu {
         while ($true) {
             $actions = @()
             if ($accounts.Count -gt 0) {
-                $actions += @{ Label = "Open existing"; Action = "login" }
+                $actions += @{ Label = "Open vault"; Action = "login" }
             }
-            $actions += @{ Label = "Create new"; Action = "add" }
-            $actions += @{ Label = "Import data"; Action = "import" }
+            $actions += @{ Label = "Create vault"; Action = "add" }
+            $actions += @{ Label = "Import vault"; Action = "import" }
             if ($accounts.Count -gt 0) {
-                $actions += @{ Label = "Remove"; Action = "delete" }
+                $actions += @{ Label = "Remove vault"; Action = "delete" }
             }
-            $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
             $actions += @{ Label = "Open data folder"; Action = "open-data" }
-            $actions += @{ Label = "Customize script"; Action = "customize" }
+            $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
+            $actions += @{ Label = "Customize"; Action = "customize" }
             $actions += @{ Label = "Quit"; Action = "quit" }
             $labels = $actions | ForEach-Object { $_.Label }
             $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
-            $menuWidth = Get-MenuBlockWidth -Items $labels -MinWidth 24 -MaxWidth 60
 
             if ($selectedAction -ge $actions.Count) {
                 $selectedAction = [Math]::Max(0, $actions.Count - 1)
@@ -2256,7 +2253,7 @@ function Show-AccountMenu {
                 $label = $action.Label.PadRight($labelWidth)
                 $isSelected = ($i -eq $selectedAction)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0 -BlockWidth $menuWidth
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
