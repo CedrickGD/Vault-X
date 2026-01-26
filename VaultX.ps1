@@ -1105,6 +1105,31 @@ function Show-Message {
     Start-Sleep -Milliseconds 900
 }
 
+function Show-TransientMessage {
+    param(
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Yellow,
+        [int]$DelayMs = 900
+    )
+    $lineTop = $null
+    try {
+        $lineTop = [Console]::CursorTop
+    } catch {
+        $lineTop = $null
+    }
+    Write-Host $Message -ForegroundColor $Color
+    Start-Sleep -Milliseconds $DelayMs
+    if ($null -ne $lineTop) {
+        try {
+            $width = Get-ConsoleWidth
+            [Console]::SetCursorPosition(0, $lineTop)
+            Write-Host (" " * ([Math]::Max(1, $width - 1)))
+            [Console]::SetCursorPosition(0, $lineTop)
+        } catch {
+        }
+    }
+}
+
 function Read-MenuKey {
     param([string]$Prompt)
     $raw = $null
@@ -1237,24 +1262,6 @@ function Set-ClipboardSafe {
         return $true
     } catch {
         return $false
-    }
-}
-
-function Invoke-ClipboardAutoClear {
-    param([int]$DelaySeconds = 15)
-    $cmd = Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue
-    if ($null -eq $cmd) { return }
-    if ($DelaySeconds -lt 1) { return }
-    try {
-        Start-Job -ScriptBlock {
-            param($delay)
-            Start-Sleep -Seconds $delay
-            $setClipboard = Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue
-            if ($null -ne $setClipboard) {
-                Set-Clipboard -Value ""
-            }
-        } -ArgumentList $DelaySeconds | Out-Null
-    } catch {
     }
 }
 
@@ -2447,8 +2454,7 @@ function Show-EntryDetail {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
                         } else {
                             if (Set-ClipboardSafe -Value $value) {
-                                Invoke-ClipboardAutoClear -DelaySeconds 15
-                                Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
+                                Show-TransientMessage -Message "Copied to clipboard." -Color ([ConsoleColor]::Green) -DelayMs 900
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
