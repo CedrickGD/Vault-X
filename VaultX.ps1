@@ -2098,6 +2098,9 @@ function Show-VaultMenu {
         @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
         @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
     )
+    $labels = $actions | ForEach-Object { $_.Label }
+    $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    $menuWidth = Get-MenuBlockWidth -Items $labels -MinWidth 26 -MaxWidth 60
     $selected = 0
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
@@ -2112,10 +2115,11 @@ function Show-VaultMenu {
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
+                $label = $action.Label.PadRight($labelWidth)
                 $isDisabled = ($action.RequiresEntry -and -not $HasEntries)
                 $isSelected = ($i -eq $selected)
                 $color = if ($isDisabled) { $script:MenuDisabledColor } elseif ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0 -BlockWidth $menuWidth
             }
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
@@ -2155,6 +2159,9 @@ function Show-CustomizeMenu {
                 @{ Label = "Reset to script defaults"; Action = "reset" }
                 @{ Label = "Back"; Action = "back" }
             )
+            $labels = $actions | ForEach-Object { $_.Label }
+            $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+            $menuWidth = Get-MenuBlockWidth -Items $labels -MinWidth 24 -MaxWidth 60
             if ($selectedAction -ge $actions.Count) {
                 $selectedAction = [Math]::Max(0, $actions.Count - 1)
             }
@@ -2166,9 +2173,10 @@ function Show-CustomizeMenu {
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
+                $label = $action.Label.PadRight($labelWidth)
                 $isSelected = ($i -eq $selectedAction)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0 -BlockWidth $menuWidth
             }
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
@@ -2225,6 +2233,9 @@ function Show-AccountMenu {
             $actions += @{ Label = "Open data folder"; Action = "open-data" }
             $actions += @{ Label = "Customize script"; Action = "customize" }
             $actions += @{ Label = "Quit"; Action = "quit" }
+            $labels = $actions | ForEach-Object { $_.Label }
+            $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+            $menuWidth = Get-MenuBlockWidth -Items $labels -MinWidth 24 -MaxWidth 60
 
             if ($selectedAction -ge $actions.Count) {
                 $selectedAction = [Math]::Max(0, $actions.Count - 1)
@@ -2242,9 +2253,10 @@ function Show-AccountMenu {
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
+                $label = $action.Label.PadRight($labelWidth)
                 $isSelected = ($i -eq $selectedAction)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0 -BlockWidth $menuWidth
             }
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
