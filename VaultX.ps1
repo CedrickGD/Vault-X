@@ -1105,31 +1105,6 @@ function Show-Message {
     Start-Sleep -Milliseconds 900
 }
 
-function Show-TransientMessage {
-    param(
-        [string]$Message,
-        [ConsoleColor]$Color = [ConsoleColor]::Yellow,
-        [int]$DelayMs = 900
-    )
-    $lineTop = $null
-    try {
-        $lineTop = [Console]::CursorTop
-    } catch {
-        $lineTop = $null
-    }
-    Write-Host $Message -ForegroundColor $Color
-    Start-Sleep -Milliseconds $DelayMs
-    if ($null -ne $lineTop) {
-        try {
-            $width = Get-ConsoleWidth
-            [Console]::SetCursorPosition(0, $lineTop)
-            Write-Host (" " * ([Math]::Max(1, $width - 1)))
-            [Console]::SetCursorPosition(0, $lineTop)
-        } catch {
-        }
-    }
-}
-
 function Read-MenuKey {
     param([string]$Prompt)
     $raw = $null
@@ -1293,31 +1268,6 @@ function Open-WebUrl {
         Show-Message "Opening URL..." ([ConsoleColor]::Green)
     } catch {
         Show-Message "Unable to open URL on this system." ([ConsoleColor]::Red)
-    }
-}
-
-function Open-BrowserExportLinks {
-    $options = @(
-        @{ Label = "Google Chrome (chrome://password-manager/passwords)"; Url = "chrome://password-manager/passwords" }
-        @{ Label = "Microsoft Edge (edge://settings/passwords)"; Url = "edge://settings/passwords" }
-        @{ Label = "Mozilla Firefox (about:logins)"; Url = "about:logins" }
-        @{ Label = "Brave (brave://settings/passwords)"; Url = "brave://settings/passwords" }
-        @{ Label = "Opera (opera://settings/passwords)"; Url = "opera://settings/passwords" }
-    )
-    $labels = @($options | ForEach-Object { $_.Label }) + @("Back")
-    while ($true) {
-        $choice = Show-ActionMenu -Title "Browser export links" -Options $labels -Subtitle "Open your browser’s password export page."
-        if ($null -eq $choice -or $choice -eq "Back") { return }
-        $selected = $options | Where-Object { $_.Label -eq $choice } | Select-Object -First 1
-        if ($null -eq $selected) { return }
-        try {
-            Start-Process -FilePath $selected.Url | Out-Null
-            Show-Message "Opening browser export page..." ([ConsoleColor]::Green)
-            return
-        } catch {
-            Show-Message "Unable to open the browser export page." ([ConsoleColor]::Red)
-            return
-        }
     }
 }
 
@@ -2129,7 +2079,6 @@ function Show-VaultMenu {
                 "data" {
                     $actions = @(
                         @{ Label = "Import browser CSV"; Action = "import-browser"; RequiresEntry = $false }
-                        @{ Label = "Browser export links"; Action = "browser-links"; RequiresEntry = $false }
                         @{ Label = "Export vault"; Action = "export"; RequiresEntry = $false }
                         @{ Label = "Back"; Action = "back"; RequiresEntry = $false }
                     )
@@ -2448,7 +2397,7 @@ function Show-EntryDetail {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
                         } else {
                             if (Set-ClipboardSafe -Value $value) {
-                                Show-TransientMessage -Message "Copied to clipboard." -Color ([ConsoleColor]::Green) -DelayMs 900
+                                Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
@@ -2639,9 +2588,6 @@ function Invoke-VaultSession {
                 }
                 "import-browser" {
                     Import-BrowserPasswords -VaultPath $VaultPath -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey -AccountName $script:VaultMeta.AccountName | Out-Null
-                }
-                "browser-links" {
-                    Open-BrowserExportLinks
                 }
                 "recovery" {
                     Invoke-RecoveryOptions -VaultPath $VaultPath -AccountName $script:VaultMeta.AccountName -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey | Out-Null
