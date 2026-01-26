@@ -1240,6 +1240,24 @@ function Set-ClipboardSafe {
     }
 }
 
+function Invoke-ClipboardAutoClear {
+    param([int]$DelaySeconds = 15)
+    $cmd = Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) { return }
+    if ($DelaySeconds -lt 1) { return }
+    try {
+        Start-Job -ScriptBlock {
+            param($delay)
+            Start-Sleep -Seconds $delay
+            $setClipboard = Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue
+            if ($null -ne $setClipboard) {
+                Set-Clipboard -Value ""
+            }
+        } -ArgumentList $DelaySeconds | Out-Null
+    } catch {
+    }
+}
+
 function ConvertTo-WebUrl {
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
@@ -2086,29 +2104,49 @@ function Show-VaultMenu {
         [string]$AccountName,
         [bool]$HasEntries
     )
-    $actions = @(
-        @{ Label = "View entries"; Action = "view"; RequiresEntry = $false }
-        @{ Label = "Add entry"; Action = "add"; RequiresEntry = $false }
-        @{ Label = "Import browser CSV"; Action = "import-browser"; RequiresEntry = $false }
-        @{ Label = "Browser export links"; Action = "browser-links"; RequiresEntry = $false }
-        @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
-        @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
-        @{ Label = "Export vault"; Action = "export"; RequiresEntry = $false }
-        @{ Label = "Recovery options"; Action = "recovery"; RequiresEntry = $false }
-        @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
-        @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
-    )
-    $labels = $actions | ForEach-Object { $_.Label }
-    $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    $menuMode = "main"
     $selected = 0
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
         $isFirstRender = $true
         while ($true) {
-            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
+            $actions = @()
             $title = "Vault Menu"
             if ($AccountName) { $title = "Vault Menu - $AccountName" }
+            switch ($menuMode) {
+                "entries" {
+                    $actions = @(
+                        @{ Label = "View entries"; Action = "view"; RequiresEntry = $false }
+                        @{ Label = "Add entry"; Action = "add"; RequiresEntry = $false }
+                        @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
+                        @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
+                        @{ Label = "Back"; Action = "back"; RequiresEntry = $false }
+                    )
+                    $title += " > Entries"
+                }
+                "data" {
+                    $actions = @(
+                        @{ Label = "Import browser CSV"; Action = "import-browser"; RequiresEntry = $false }
+                        @{ Label = "Browser export links"; Action = "browser-links"; RequiresEntry = $false }
+                        @{ Label = "Export vault"; Action = "export"; RequiresEntry = $false }
+                        @{ Label = "Back"; Action = "back"; RequiresEntry = $false }
+                    )
+                    $title += " > Import/Export"
+                }
+                default {
+                    $actions = @(
+                        @{ Label = "Entries"; Action = "entries-menu"; RequiresEntry = $false }
+                        @{ Label = "Import/Export"; Action = "data-menu"; RequiresEntry = $false }
+                        @{ Label = "Recovery options"; Action = "recovery"; RequiresEntry = $false }
+                        @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
+                        @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
+                    )
+                }
+            }
+            $labels = $actions | ForEach-Object { $_.Label }
+            $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header $title -ShowBanner
             Write-Host ""
             Write-MenuSeparator -Indent 0
@@ -2136,7 +2174,26 @@ function Show-VaultMenu {
                         Show-Message "No entries available." ([ConsoleColor]::Red)
                         continue
                     }
-                    return $action.Action
+                    switch ($action.Action) {
+                        "entries-menu" {
+                            $menuMode = "entries"
+                            $selected = 0
+                            continue
+                        }
+                        "data-menu" {
+                            $menuMode = "data"
+                            $selected = 0
+                            continue
+                        }
+                        "back" {
+                            $menuMode = "main"
+                            $selected = 0
+                            continue
+                        }
+                        default {
+                            return $action.Action
+                        }
+                    }
                 }
                 "Escape" { return "logout" }
             }
@@ -2211,6 +2268,7 @@ function Show-AccountMenu {
     param([array]$Accounts, [int]$Selected = 0)
     $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
     $selectedAction = 0
+    $menuMode = "main"
     $cursorState = Get-CursorVisible
     $watcher = New-VaultFolderWatcher
     $vaultStamp = Get-VaultFilesStamp
@@ -2219,18 +2277,30 @@ function Show-AccountMenu {
         $isFirstRender = $true
         while ($true) {
             $actions = @()
-            if ($accounts.Count -gt 0) {
-                $actions += @{ Label = "Open vault"; Action = "login" }
+            switch ($menuMode) {
+                "vaults" {
+                    if ($accounts.Count -gt 0) {
+                        $actions += @{ Label = "Open vault"; Action = "login" }
+                    }
+                    $actions += @{ Label = "Create vault"; Action = "add" }
+                    $actions += @{ Label = "Import vault"; Action = "import" }
+                    if ($accounts.Count -gt 0) {
+                        $actions += @{ Label = "Remove vault"; Action = "delete" }
+                    }
+                    $actions += @{ Label = "Back"; Action = "back" }
+                }
+                "settings" {
+                    $actions += @{ Label = "Open data folder"; Action = "open-data" }
+                    $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
+                    $actions += @{ Label = "Customize"; Action = "customize" }
+                    $actions += @{ Label = "Back"; Action = "back" }
+                }
+                default {
+                    $actions += @{ Label = "Vaults"; Action = "vaults-menu" }
+                    $actions += @{ Label = "Settings"; Action = "settings-menu" }
+                    $actions += @{ Label = "Quit"; Action = "quit" }
+                }
             }
-            $actions += @{ Label = "Create vault"; Action = "add" }
-            $actions += @{ Label = "Import vault"; Action = "import" }
-            if ($accounts.Count -gt 0) {
-                $actions += @{ Label = "Remove vault"; Action = "delete" }
-            }
-            $actions += @{ Label = "Open data folder"; Action = "open-data" }
-            $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
-            $actions += @{ Label = "Customize"; Action = "customize" }
-            $actions += @{ Label = "Quit"; Action = "quit" }
             $labels = $actions | ForEach-Object { $_.Label }
             $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
 
@@ -2239,14 +2309,19 @@ function Show-AccountMenu {
             }
 
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
-            Write-Header "Main Menu" -ShowBanner
-            if ($accounts.Count -eq 0) {
-                Write-Host "No vaults yet." -ForegroundColor DarkGray
-            } else {
-                $names = $accounts | ForEach-Object { $_.Name } | Sort-Object
-                Write-Host ("Vaults: " + ($names -join ", ")) -ForegroundColor DarkGray
+            $title = "Main Menu"
+            if ($menuMode -eq "vaults") { $title = "Main Menu > Vaults" }
+            if ($menuMode -eq "settings") { $title = "Main Menu > Settings" }
+            Write-Header $title -ShowBanner
+            if ($menuMode -ne "settings") {
+                if ($accounts.Count -eq 0) {
+                    Write-Host "No vaults yet." -ForegroundColor DarkGray
+                } else {
+                    $names = $accounts | ForEach-Object { $_.Name } | Sort-Object
+                    Write-Host ("Vaults: " + ($names -join ", ")) -ForegroundColor DarkGray
+                }
+                Write-Host ""
             }
-            Write-Host ""
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
@@ -2284,7 +2359,26 @@ function Show-AccountMenu {
                 }
                 "Enter" {
                     $action = $actions[$selectedAction]
-                    return @{ Action = $action.Action; Selected = 0; Accounts = $accounts }
+                    switch ($action.Action) {
+                        "vaults-menu" {
+                            $menuMode = "vaults"
+                            $selectedAction = 0
+                            continue
+                        }
+                        "settings-menu" {
+                            $menuMode = "settings"
+                            $selectedAction = 0
+                            continue
+                        }
+                        "back" {
+                            $menuMode = "main"
+                            $selectedAction = 0
+                            continue
+                        }
+                        default {
+                            return @{ Action = $action.Action; Selected = 0; Accounts = $accounts }
+                        }
+                    }
                 }
                 "Escape" {
                     return @{ Action = "quit"; Selected = 0; Accounts = $accounts }
@@ -2353,6 +2447,7 @@ function Show-EntryDetail {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
                         } else {
                             if (Set-ClipboardSafe -Value $value) {
+                                Invoke-ClipboardAutoClear -DelaySeconds 15
                                 Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
