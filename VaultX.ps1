@@ -1790,7 +1790,8 @@ function Write-MenuItem {
         [string]$Align = "Left",
         [int]$BlockWidth = 0
     )
-    $maxWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent + 4))
+    $consoleWidth = [Math]::Max(10, (Get-ConsoleWidth))
+    $maxWidth = [Math]::Max(10, $consoleWidth - ($Indent + 4))
     $safeText = Format-MenuText -Text $Text -Max $maxWidth
     $pointerColor = if ($IsActive) { $script:MenuHighlightColor } else { $script:MenuHighlightColor }
     if ($Align -eq "Center") {
@@ -1798,8 +1799,9 @@ function Write-MenuItem {
         $line = $prefix + $safeText
         $width = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
         $padding = [Math]::Max(0, [Math]::Floor(($width - $line.Length) / 2))
+        $render = ((" " * $padding) + $line).PadRight($width)
         if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-        Write-Host ((" " * $padding) + $line) -ForegroundColor $Color
+        Write-Host $render -ForegroundColor $Color
         return
     }
     if ($BlockWidth -gt 0) {
@@ -1808,19 +1810,17 @@ function Write-MenuItem {
         $width = [Math]::Max($BlockWidth, $line.Length)
         $screenWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
         $padding = [Math]::Max(0, [Math]::Floor(($screenWidth - $width) / 2))
+        $render = ((" " * $padding) + $line).PadRight($screenWidth)
         if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-        Write-Host ((" " * $padding) + $line) -ForegroundColor $Color
+        Write-Host $render -ForegroundColor $Color
         return
     }
-    if ($IsSelected) {
-        if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-        Write-Host $script:MenuPointerSymbol -ForegroundColor $pointerColor -NoNewline
-        Write-Host " " -NoNewline
-        Write-Host $safeText -ForegroundColor $Color
-    } else {
-        $padding = " " * ($Indent + 2)
-        Write-Host ($padding + $safeText) -ForegroundColor $Color
-    }
+    $prefix = if ($IsSelected) { "$script:MenuPointerSymbol " } else { "  " }
+    $line = $prefix + $safeText
+    $renderWidth = [Math]::Max(10, $consoleWidth - $Indent)
+    $render = $line.PadRight($renderWidth)
+    if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
+    Write-Host $render -ForegroundColor $Color
 }
 
 function Show-ActionMenu {
