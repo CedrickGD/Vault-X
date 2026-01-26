@@ -720,6 +720,123 @@ function Import-VaultData {
     return @{ Accounts = $accounts; Imported = $true }
 }
 
+function Get-CsvRowValue {
+    param(
+        $Row,
+        [string[]]$Names
+    )
+    if ($null -eq $Row -or $null -eq $Names) { return "" }
+    foreach ($name in $Names) {
+        foreach ($prop in $Row.PSObject.Properties) {
+            if ($prop.Name -ieq $name) {
+                $value = [string]$prop.Value
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    return $value.Trim()
+                }
+            }
+        }
+    }
+    return ""
+}
+
+function Convert-BrowserCsvRowToEntry {
+    param($Row)
+    $title = Get-CsvRowValue -Row $Row -Names @("name", "title", "site", "site_name", "hostname", "host", "url", "website", "origin")
+    $url = Get-CsvRowValue -Row $Row -Names @("url", "website", "origin", "site", "hostname", "host", "formActionOrigin", "form_action_origin")
+    $username = Get-CsvRowValue -Row $Row -Names @("username", "user", "user_name", "login", "login_username", "email", "username_value")
+    $password = Get-CsvRowValue -Row $Row -Names @("password", "pass", "password_value", "login_password")
+    $notes = Get-CsvRowValue -Row $Row -Names @("note", "notes", "comment", "description")
+    $other = Get-CsvRowValue -Row $Row -Names @("httpRealm", "realm")
+
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = $url }
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = $username }
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = "Imported entry" }
+
+    if ([string]::IsNullOrWhiteSpace($url) -and [string]::IsNullOrWhiteSpace($username) -and [string]::IsNullOrWhiteSpace($password) -and [string]::IsNullOrWhiteSpace($notes) -and [string]::IsNullOrWhiteSpace($other)) {
+        return $null
+    }
+
+    $importTag = "Imported from browser CSV"
+    if ([string]::IsNullOrWhiteSpace($other)) {
+        $other = $importTag
+    } else {
+        $other = "$other`n$importTag"
+    }
+
+    return [ordered]@{
+        Id = [guid]::NewGuid().ToString()
+        Title = $title
+        Url = $url
+        Username = $username
+        Password = $password
+        Phone = ""
+        Email = ""
+        Notes = $notes
+        Other = $other
+        UpdatedAt = (Get-Date).ToString("s")
+    }
+}
+
+function Import-BrowserPasswords {
+    param(
+        [string]$VaultPath,
+        $Meta,
+        $Data,
+        $Key,
+        [string]$AccountName
+    )
+    if ($null -eq $Data.Entries) {
+        $Data | Add-Member -NotePropertyName Entries -NotePropertyValue @() -Force
+    }
+    Clear-Host
+    Write-Header "Import browser passwords"
+    $choice = Show-ActionMenu -Title "Import browser passwords" -Options @("Open data folder", "Enter file path", "Back") -Subtitle "Use a browser CSV export to add entries to this vault."
+    if ($null -eq $choice -or $choice -eq "Back") { return $false }
+    if ($choice -eq "Open data folder") {
+        Open-AppDataFolder | Out-Null
+        $choice = Show-ActionMenu -Title "Import browser passwords" -Options @("Enter file path", "Back") -Subtitle "When ready, enter the browser CSV file path."
+        if ($null -eq $choice -or $choice -eq "Back") { return $false }
+    }
+    $path = Read-Host "Path to browser CSV (Enter to abort)"
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $path = $path.Trim()
+    if (-not (Test-PathSafe -Path $path)) {
+        Show-Message "CSV path is invalid or not found." ([ConsoleColor]::Red)
+        return $false
+    }
+    try {
+        $rows = Import-Csv -LiteralPath $path
+    } catch {
+        Show-Message "CSV file is unreadable or invalid." ([ConsoleColor]::Red)
+        return $false
+    }
+    if ($null -eq $rows -or $rows.Count -eq 0) {
+        Show-Message "No rows found in CSV." ([ConsoleColor]::Yellow)
+        return $false
+    }
+    $added = 0
+    $skipped = 0
+    foreach ($row in $rows) {
+        $entry = Convert-BrowserCsvRowToEntry -Row $row
+        if ($null -eq $entry) {
+            $skipped++
+            continue
+        }
+        $Data.Entries += $entry
+        $added++
+    }
+    if ($added -gt 0) {
+        Save-Vault -VaultPath $VaultPath -Key $Key -Meta $Meta -Data $Data
+    }
+    $message = if ($skipped -gt 0) {
+        "Imported $added entries. Skipped $skipped row(s)."
+    } else {
+        "Imported $added entries."
+    }
+    Show-Message $message ([ConsoleColor]::Green)
+    return ($added -gt 0)
+}
+
 function Confirm-AccountPassword {
     param([string]$VaultPath, [string]$AccountName)
     if (-not (Test-Path $VaultPath)) {
@@ -1334,15 +1451,9 @@ function Get-MenuBlockWidth {
 
 function Start-MenuFrame {
     param([ref]$IsFirstRender)
+    Clear-Host
     if ($IsFirstRender.Value) {
-        Clear-Host
         $IsFirstRender.Value = $false
-        return
-    }
-    try {
-        [Console]::SetCursorPosition(0, 0)
-    } catch {
-        Clear-Host
     }
 }
 
@@ -1418,7 +1529,7 @@ function Show-ActionMenu {
                 Write-MenuItem -Text $line -IsSelected $isSelected -Color $color -Align "Center"
             }
             Write-Host ""
-            Write-Host "Use Up/Down to move, Enter to select, Esc to go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[Up/Down] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1832,8 +1943,8 @@ function Show-EntryList {
             }
 
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
-            Write-Host "Type to search, Backspace delete." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[Up/Down] Move  [Enter] Select  [Esc] Back"
+            Write-MenuHelpHint "[Type] Search  [Backspace] Delete"
 
             $skipIndexUpdate = $false
             $key = Read-MenuKey
@@ -1916,7 +2027,7 @@ function Show-AccountPicker {
             $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
             Write-MenuItem -Text "Back" -IsSelected $isSelected -Color $color -Indent 0
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[Up/Down] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1944,37 +2055,61 @@ function Show-VaultMenu {
         [string]$AccountName,
         [bool]$HasEntries
     )
-    $actions = @(
-        @{ Label = "View entries"; Action = "view"; RequiresEntry = $false }
-        @{ Label = "Add entry"; Action = "add"; RequiresEntry = $false }
-        @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
-        @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
-        @{ Label = "Export vault (encrypted)"; Action = "export"; RequiresEntry = $false }
-        @{ Label = "Recovery options"; Action = "recovery"; RequiresEntry = $false }
-        @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
-        @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
-    )
+    $menuMode = "main"
     $selected = 0
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
         $isFirstRender = $true
         while ($true) {
-            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
+            $actions = @()
             $title = "Vault Menu"
             if ($AccountName) { $title = "Vault Menu - $AccountName" }
+            switch ($menuMode) {
+                "entries" {
+                    $actions = @(
+                        @{ Label = "View entries"; Action = "view"; RequiresEntry = $false }
+                        @{ Label = "Add entry"; Action = "add"; RequiresEntry = $false }
+                        @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
+                        @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
+                        @{ Label = "Back"; Action = "back"; RequiresEntry = $false }
+                    )
+                    $title += " > Entries"
+                }
+                "data" {
+                    $actions = @(
+                        @{ Label = "Import browser CSV"; Action = "import-browser"; RequiresEntry = $false }
+                        @{ Label = "Export vault"; Action = "export"; RequiresEntry = $false }
+                        @{ Label = "Back"; Action = "back"; RequiresEntry = $false }
+                    )
+                    $title += " > Import/Export"
+                }
+                default {
+                    $actions = @(
+                        @{ Label = "Entries"; Action = "entries-menu"; RequiresEntry = $false }
+                        @{ Label = "Import/Export"; Action = "data-menu"; RequiresEntry = $false }
+                        @{ Label = "Recovery options"; Action = "recovery"; RequiresEntry = $false }
+                        @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
+                        @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
+                    )
+                }
+            }
+            $labels = $actions | ForEach-Object { $_.Label }
+            $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+            Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header $title -ShowBanner
             Write-Host ""
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
+                $label = $action.Label.PadRight($labelWidth)
                 $isDisabled = ($action.RequiresEntry -and -not $HasEntries)
                 $isSelected = ($i -eq $selected)
                 $color = if ($isDisabled) { $script:MenuDisabledColor } elseif ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:(!$isDisabled) -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[Up/Down] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -1989,7 +2124,26 @@ function Show-VaultMenu {
                         Show-Message "No entries available." ([ConsoleColor]::Red)
                         continue
                     }
-                    return $action.Action
+                    switch ($action.Action) {
+                        "entries-menu" {
+                            $menuMode = "entries"
+                            $selected = 0
+                            continue
+                        }
+                        "data-menu" {
+                            $menuMode = "data"
+                            $selected = 0
+                            continue
+                        }
+                        "back" {
+                            $menuMode = "main"
+                            $selected = 0
+                            continue
+                        }
+                        default {
+                            return $action.Action
+                        }
+                    }
                 }
                 "Escape" { return "logout" }
             }
@@ -2008,9 +2162,11 @@ function Show-CustomizeMenu {
         while ($true) {
             $actions = @(
                 @{ Label = "Change font color"; Action = "font-color" }
-                @{ Label = "Reset to script defaults"; Action = "reset" }
+                @{ Label = "Reset to defaults"; Action = "reset" }
                 @{ Label = "Back"; Action = "back" }
             )
+            $labels = $actions | ForEach-Object { $_.Label }
+            $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
             if ($selectedAction -ge $actions.Count) {
                 $selectedAction = [Math]::Max(0, $actions.Count - 1)
             }
@@ -2022,12 +2178,13 @@ function Show-CustomizeMenu {
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
+                $label = $action.Label.PadRight($labelWidth)
                 $isSelected = ($i -eq $selectedAction)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[Up/Down] Move  [Enter] Select  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2061,6 +2218,7 @@ function Show-AccountMenu {
     param([array]$Accounts, [int]$Selected = 0)
     $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
     $selectedAction = 0
+    $menuMode = "main"
     $cursorState = Get-CursorVisible
     $watcher = New-VaultFolderWatcher
     $vaultStamp = Get-VaultFilesStamp
@@ -2069,41 +2227,61 @@ function Show-AccountMenu {
         $isFirstRender = $true
         while ($true) {
             $actions = @()
-            if ($accounts.Count -gt 0) {
-                $actions += @{ Label = "Open existing"; Action = "login" }
+            switch ($menuMode) {
+                "vaults" {
+                    if ($accounts.Count -gt 0) {
+                        $actions += @{ Label = "Open vault"; Action = "login" }
+                    }
+                    $actions += @{ Label = "Create vault"; Action = "add" }
+                    $actions += @{ Label = "Import vault"; Action = "import" }
+                    if ($accounts.Count -gt 0) {
+                        $actions += @{ Label = "Remove vault"; Action = "delete" }
+                    }
+                    $actions += @{ Label = "Back"; Action = "back" }
+                }
+                "settings" {
+                    $actions += @{ Label = "Open data folder"; Action = "open-data" }
+                    $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
+                    $actions += @{ Label = "Customize"; Action = "customize" }
+                    $actions += @{ Label = "Back"; Action = "back" }
+                }
+                default {
+                    $actions += @{ Label = "Vaults"; Action = "vaults-menu" }
+                    $actions += @{ Label = "Settings"; Action = "settings-menu" }
+                    $actions += @{ Label = "Quit"; Action = "quit" }
+                }
             }
-            $actions += @{ Label = "Create new"; Action = "add" }
-            $actions += @{ Label = "Import data"; Action = "import" }
-            if ($accounts.Count -gt 0) {
-                $actions += @{ Label = "Remove"; Action = "delete" }
-            }
-            $actions += @{ Label = "Wipe cache"; Action = "wipe-cache" }
-            $actions += @{ Label = "Open data folder"; Action = "open-data" }
-            $actions += @{ Label = "Customize script"; Action = "customize" }
-            $actions += @{ Label = "Quit"; Action = "quit" }
+            $labels = $actions | ForEach-Object { $_.Label }
+            $labelWidth = ($labels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
 
             if ($selectedAction -ge $actions.Count) {
                 $selectedAction = [Math]::Max(0, $actions.Count - 1)
             }
 
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
-            Write-Header "Main Menu" -ShowBanner
-            if ($accounts.Count -eq 0) {
-                Write-Host "No vaults yet." -ForegroundColor DarkGray
-            } else {
-                $names = $accounts | ForEach-Object { $_.Name } | Sort-Object
-                Write-Host ("Vaults: " + ($names -join ", ")) -ForegroundColor DarkGray
+            $title = "Main Menu"
+            if ($menuMode -eq "vaults") { $title = "Main Menu > Vaults" }
+            if ($menuMode -eq "settings") { $title = "Main Menu > Settings" }
+            Write-Header $title -ShowBanner
+            if ($menuMode -ne "settings") {
+                if ($accounts.Count -eq 0) {
+                    Write-Host "No vaults yet." -ForegroundColor DarkGray
+                } else {
+                    $names = $accounts | ForEach-Object { $_.Name } | Sort-Object
+                    Write-Host ("Vaults: " + ($names -join ", ")) -ForegroundColor DarkGray
+                }
+                Write-Host ""
             }
-            Write-Host ""
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
+                $label = $action.Label.PadRight($labelWidth)
                 $isSelected = ($i -eq $selectedAction)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $action.Label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
+                Write-MenuItem -Text $label -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[Up/Down] Move  [Enter] Select  [Esc] Quit"
             $key = Read-MenuKeyWithRefresh -RefreshIntervalMs 700 -OnRefresh {
                 $currentStamp = Get-VaultFilesStamp
                 if ($currentStamp -ne $vaultStamp) {
@@ -2131,7 +2309,26 @@ function Show-AccountMenu {
                 }
                 "Enter" {
                     $action = $actions[$selectedAction]
-                    return @{ Action = $action.Action; Selected = 0; Accounts = $accounts }
+                    switch ($action.Action) {
+                        "vaults-menu" {
+                            $menuMode = "vaults"
+                            $selectedAction = 0
+                            continue
+                        }
+                        "settings-menu" {
+                            $menuMode = "settings"
+                            $selectedAction = 0
+                            continue
+                        }
+                        "back" {
+                            $menuMode = "main"
+                            $selectedAction = 0
+                            continue
+                        }
+                        default {
+                            return @{ Action = $action.Action; Selected = 0; Accounts = $accounts }
+                        }
+                    }
                 }
                 "Escape" {
                     return @{ Action = "quit"; Selected = 0; Accounts = $accounts }
@@ -2179,7 +2376,7 @@ function Show-EntryDetail {
                 Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$true -Color $color
             }
             Write-Host ""
-            Write-Host "Enter copies field or runs action, Esc go back." -ForegroundColor DarkGray
+            Write-MenuHelpHint "[Up/Down] Move  [Enter] Copy/Action  [Esc] Back"
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2388,6 +2585,9 @@ function Invoke-VaultSession {
                 }
                 "export" {
                     Export-VaultData -AccountName $script:VaultMeta.AccountName -VaultData $script:VaultData | Out-Null
+                }
+                "import-browser" {
+                    Import-BrowserPasswords -VaultPath $VaultPath -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey -AccountName $script:VaultMeta.AccountName | Out-Null
                 }
                 "recovery" {
                     Invoke-RecoveryOptions -VaultPath $VaultPath -AccountName $script:VaultMeta.AccountName -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey | Out-Null
