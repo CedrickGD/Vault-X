@@ -1105,6 +1105,31 @@ function Show-Message {
     Start-Sleep -Milliseconds 900
 }
 
+function Show-MessageTransient {
+    param(
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Yellow,
+        [int]$DelayMs = 900
+    )
+    $lineTop = $null
+    try {
+        $lineTop = [Console]::CursorTop
+    } catch {
+        $lineTop = $null
+    }
+    Write-Host $Message -ForegroundColor $Color
+    Start-Sleep -Milliseconds $DelayMs
+    if ($null -ne $lineTop) {
+        try {
+            $width = Get-ConsoleWidth
+            [Console]::SetCursorPosition(0, $lineTop)
+            Write-Host (" " * ([Math]::Max(1, $width - 1)))
+            [Console]::SetCursorPosition(0, $lineTop)
+        } catch {
+        }
+    }
+}
+
 function Read-MenuKey {
     param([string]$Prompt)
     $raw = $null
@@ -2397,7 +2422,7 @@ function Show-EntryDetail {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
                         } else {
                             if (Set-ClipboardSafe -Value $value) {
-                                Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
+                                Show-MessageTransient -Message "Copied to clipboard." -Color ([ConsoleColor]::Green) -DelayMs 1000
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
