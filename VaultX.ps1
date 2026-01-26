@@ -720,6 +720,123 @@ function Import-VaultData {
     return @{ Accounts = $accounts; Imported = $true }
 }
 
+function Get-CsvRowValue {
+    param(
+        $Row,
+        [string[]]$Names
+    )
+    if ($null -eq $Row -or $null -eq $Names) { return "" }
+    foreach ($name in $Names) {
+        foreach ($prop in $Row.PSObject.Properties) {
+            if ($prop.Name -ieq $name) {
+                $value = [string]$prop.Value
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    return $value.Trim()
+                }
+            }
+        }
+    }
+    return ""
+}
+
+function Convert-BrowserCsvRowToEntry {
+    param($Row)
+    $title = Get-CsvRowValue -Row $Row -Names @("name", "title", "site", "site_name", "hostname", "host", "url", "website", "origin")
+    $url = Get-CsvRowValue -Row $Row -Names @("url", "website", "origin", "site", "hostname", "host", "formActionOrigin", "form_action_origin")
+    $username = Get-CsvRowValue -Row $Row -Names @("username", "user", "user_name", "login", "login_username", "email", "username_value")
+    $password = Get-CsvRowValue -Row $Row -Names @("password", "pass", "password_value", "login_password")
+    $notes = Get-CsvRowValue -Row $Row -Names @("note", "notes", "comment", "description")
+    $other = Get-CsvRowValue -Row $Row -Names @("httpRealm", "realm")
+
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = $url }
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = $username }
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = "Imported entry" }
+
+    if ([string]::IsNullOrWhiteSpace($url) -and [string]::IsNullOrWhiteSpace($username) -and [string]::IsNullOrWhiteSpace($password) -and [string]::IsNullOrWhiteSpace($notes) -and [string]::IsNullOrWhiteSpace($other)) {
+        return $null
+    }
+
+    $importTag = "Imported from browser CSV"
+    if ([string]::IsNullOrWhiteSpace($other)) {
+        $other = $importTag
+    } else {
+        $other = "$other`n$importTag"
+    }
+
+    return [ordered]@{
+        Id = [guid]::NewGuid().ToString()
+        Title = $title
+        Url = $url
+        Username = $username
+        Password = $password
+        Phone = ""
+        Email = ""
+        Notes = $notes
+        Other = $other
+        UpdatedAt = (Get-Date).ToString("s")
+    }
+}
+
+function Import-BrowserPasswords {
+    param(
+        [string]$VaultPath,
+        $Meta,
+        $Data,
+        $Key,
+        [string]$AccountName
+    )
+    if ($null -eq $Data.Entries) {
+        $Data | Add-Member -NotePropertyName Entries -NotePropertyValue @() -Force
+    }
+    Clear-Host
+    Write-Header "Import browser passwords"
+    $choice = Show-ActionMenu -Title "Import browser passwords" -Options @("Open data folder", "Enter file path", "Back") -Subtitle "Use a browser CSV export to add entries to this vault."
+    if ($null -eq $choice -or $choice -eq "Back") { return $false }
+    if ($choice -eq "Open data folder") {
+        Open-AppDataFolder | Out-Null
+        $choice = Show-ActionMenu -Title "Import browser passwords" -Options @("Enter file path", "Back") -Subtitle "When ready, enter the browser CSV file path."
+        if ($null -eq $choice -or $choice -eq "Back") { return $false }
+    }
+    $path = Read-Host "Path to browser CSV (Enter to abort)"
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $path = $path.Trim()
+    if (-not (Test-PathSafe -Path $path)) {
+        Show-Message "CSV path is invalid or not found." ([ConsoleColor]::Red)
+        return $false
+    }
+    try {
+        $rows = Import-Csv -LiteralPath $path
+    } catch {
+        Show-Message "CSV file is unreadable or invalid." ([ConsoleColor]::Red)
+        return $false
+    }
+    if ($null -eq $rows -or $rows.Count -eq 0) {
+        Show-Message "No rows found in CSV." ([ConsoleColor]::Yellow)
+        return $false
+    }
+    $added = 0
+    $skipped = 0
+    foreach ($row in $rows) {
+        $entry = Convert-BrowserCsvRowToEntry -Row $row
+        if ($null -eq $entry) {
+            $skipped++
+            continue
+        }
+        $Data.Entries += $entry
+        $added++
+    }
+    if ($added -gt 0) {
+        Save-Vault -VaultPath $VaultPath -Key $Key -Meta $Meta -Data $Data
+    }
+    $message = if ($skipped -gt 0) {
+        "Imported $added entries. Skipped $skipped row(s)."
+    } else {
+        "Imported $added entries."
+    }
+    Show-Message $message ([ConsoleColor]::Green)
+    return ($added -gt 0)
+}
+
 function Confirm-AccountPassword {
     param([string]$VaultPath, [string]$AccountName)
     if (-not (Test-Path $VaultPath)) {
@@ -1151,6 +1268,31 @@ function Open-WebUrl {
         Show-Message "Opening URL..." ([ConsoleColor]::Green)
     } catch {
         Show-Message "Unable to open URL on this system." ([ConsoleColor]::Red)
+    }
+}
+
+function Open-BrowserExportLinks {
+    $options = @(
+        @{ Label = "Google Chrome (chrome://password-manager/passwords)"; Url = "chrome://password-manager/passwords" }
+        @{ Label = "Microsoft Edge (edge://settings/passwords)"; Url = "edge://settings/passwords" }
+        @{ Label = "Mozilla Firefox (about:logins)"; Url = "about:logins" }
+        @{ Label = "Brave (brave://settings/passwords)"; Url = "brave://settings/passwords" }
+        @{ Label = "Opera (opera://settings/passwords)"; Url = "opera://settings/passwords" }
+    )
+    $labels = @($options | ForEach-Object { $_.Label }) + @("Back")
+    while ($true) {
+        $choice = Show-ActionMenu -Title "Browser export links" -Options $labels -Subtitle "Open your browser’s password export page."
+        if ($null -eq $choice -or $choice -eq "Back") { return }
+        $selected = $options | Where-Object { $_.Label -eq $choice } | Select-Object -First 1
+        if ($null -eq $selected) { return }
+        try {
+            Start-Process -FilePath $selected.Url | Out-Null
+            Show-Message "Opening browser export page..." ([ConsoleColor]::Green)
+            return
+        } catch {
+            Show-Message "Unable to open the browser export page." ([ConsoleColor]::Red)
+            return
+        }
     }
 }
 
@@ -1950,6 +2092,8 @@ function Show-VaultMenu {
         @{ Label = "Edit entry"; Action = "edit"; RequiresEntry = $true }
         @{ Label = "Delete entry"; Action = "delete"; RequiresEntry = $true }
         @{ Label = "Export vault (encrypted)"; Action = "export"; RequiresEntry = $false }
+        @{ Label = "Import browser passwords (CSV)"; Action = "import-browser"; RequiresEntry = $false }
+        @{ Label = "Get browser CSV export links"; Action = "browser-links"; RequiresEntry = $false }
         @{ Label = "Recovery options"; Action = "recovery"; RequiresEntry = $false }
         @{ Label = "Back to vault list"; Action = "logout"; RequiresEntry = $false }
         @{ Label = "Quit VaultX"; Action = "quit"; RequiresEntry = $false }
@@ -2388,6 +2532,12 @@ function Invoke-VaultSession {
                 }
                 "export" {
                     Export-VaultData -AccountName $script:VaultMeta.AccountName -VaultData $script:VaultData | Out-Null
+                }
+                "import-browser" {
+                    Import-BrowserPasswords -VaultPath $VaultPath -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey -AccountName $script:VaultMeta.AccountName | Out-Null
+                }
+                "browser-links" {
+                    Open-BrowserExportLinks
                 }
                 "recovery" {
                     Invoke-RecoveryOptions -VaultPath $VaultPath -AccountName $script:VaultMeta.AccountName -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey | Out-Null
