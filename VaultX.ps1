@@ -1349,7 +1349,7 @@ function Complete-MenuFrame {
     if ($null -eq $currentBottom) { return }
     $previousBottom = $script:MenuLastRenderBottom
     if ($previousBottom -gt $currentBottom) {
-        $width = [Math]::Max(1, Get-ConsoleWidth)
+        $width = [Math]::Max(1, (Get-ConsoleWidth))
         $blank = " " * $width
         for ($row = $currentBottom; $row -lt $previousBottom; $row++) {
             try {
