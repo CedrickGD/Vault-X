@@ -23,6 +23,9 @@ $script:MenuSeparatorColor = [ConsoleColor]::DarkGray
 $script:MenuPromptColor = [ConsoleColor]::Gray
 $script:MenuBannerColor = [ConsoleColor]::Cyan
 $script:MenuPointerSymbol = ">"
+$script:MenuStyle = "Clean"
+$script:DefaultMenuStyle = $script:MenuStyle
+$script:MenuLastRenderBottom = 0
 $script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
 $script:DefaultMenuNormalColor = $script:MenuNormalColor
 $script:DefaultMenuPromptColor = $script:MenuPromptColor
@@ -1307,6 +1310,63 @@ function Get-ConsoleHeight {
     }
 }
 
+function Get-MenuStyleDisplayName {
+    switch ($script:MenuStyle) {
+        "ActionTag" { return "Action tag" }
+        "Bracketed" { return "Bracketed" }
+        default { return "Clean" }
+    }
+}
+
+function Resolve-MenuStyle {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    switch ($Value.Trim().ToLowerInvariant()) {
+        "clean" { return "Clean" }
+        "actiontag" { return "ActionTag" }
+        "action tag" { return "ActionTag" }
+        "bracketed" { return "Bracketed" }
+        "bracket" { return "Bracketed" }
+        default { return $null }
+    }
+}
+
+function Set-MenuStyle {
+    param([string]$Style)
+    $resolved = Resolve-MenuStyle -Value $Style
+    if ($null -eq $resolved) { return $false }
+    $script:MenuStyle = $resolved
+    return $true
+}
+
+function Complete-MenuFrame {
+    $currentBottom = $null
+    try {
+        $currentBottom = [Console]::CursorTop
+    } catch {
+        return
+    }
+    if ($null -eq $currentBottom) { return }
+    $previousBottom = $script:MenuLastRenderBottom
+    if ($previousBottom -gt $currentBottom) {
+        $width = [Math]::Max(1, Get-ConsoleWidth)
+        $blank = " " * $width
+        for ($row = $currentBottom; $row -lt $previousBottom; $row++) {
+            try {
+                [Console]::SetCursorPosition(0, $row)
+            } catch {
+                break
+            }
+            Write-Host $blank -NoNewline
+        }
+        try {
+            [Console]::SetCursorPosition(0, $currentBottom)
+        } catch {
+        }
+    }
+    $script:MenuLastRenderBottom = $currentBottom
+}
+
 function Write-MenuPrompt {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
@@ -1510,13 +1570,14 @@ function Save-UiColorSettings {
     $settings | Add-Member -NotePropertyName DisabledColor -NotePropertyValue ($script:MenuDisabledColor.ToString()) -Force
     $settings | Add-Member -NotePropertyName PromptColor -NotePropertyValue ($script:MenuPromptColor.ToString()) -Force
     $settings | Add-Member -NotePropertyName BannerColor -NotePropertyValue ($script:MenuBannerColor.ToString()) -Force
+    $settings | Add-Member -NotePropertyName MenuStyle -NotePropertyValue $script:MenuStyle -Force
     Write-Settings -Settings $settings
 }
 
 function Clear-UiColorSettings {
     $settings = Read-Settings
     if ($null -eq $settings) { return }
-    $names = @("FontColor", "HighlightColor", "SeparatorColor", "DisabledColor", "PromptColor", "BannerColor")
+    $names = @("FontColor", "HighlightColor", "SeparatorColor", "DisabledColor", "PromptColor", "BannerColor", "MenuStyle")
     foreach ($name in $names) {
         if ($settings.PSObject.Properties.Name -contains $name) {
             $settings.PSObject.Properties.Remove($name)
@@ -1569,6 +1630,12 @@ function Initialize-Settings {
         $color = Resolve-ConsoleColor -Value $bannerValue
         if ($null -ne $color) { Set-BannerColor -Color $color }
     }
+    $menuStyle = $settings.MenuStyle
+    if (-not [string]::IsNullOrWhiteSpace($menuStyle)) {
+        if (-not (Set-MenuStyle -Style $menuStyle)) {
+            Write-Log ("Invalid saved menu style: {0}" -f $menuStyle)
+        }
+    }
 }
 
 function Reset-CustomizationDefaults {
@@ -1578,6 +1645,7 @@ function Reset-CustomizationDefaults {
     $script:MenuHighlightColor = $script:DefaultMenuHighlightColor
     $script:MenuSeparatorColor = $script:DefaultMenuSeparatorColor
     $script:MenuDisabledColor = $script:DefaultMenuDisabledColor
+    $script:MenuStyle = $script:DefaultMenuStyle
     try {
         if ($Host -and $Host.UI -and $Host.UI.RawUI -and $null -ne $script:DefaultHostForegroundColor) {
             $Host.UI.RawUI.ForegroundColor = $script:DefaultHostForegroundColor
@@ -1655,6 +1723,50 @@ function Invoke-ColorPreview {
     }
 }
 
+function Invoke-MenuStylePreview {
+    param([string]$Style)
+    $previous = $script:MenuStyle
+    if (-not (Set-MenuStyle -Style $Style)) { return $false }
+    $choice = ""
+    try {
+        Clear-Host
+        Write-CompactHeader -Title "Menu style preview"
+        Write-Host ("Style: " + (Get-MenuStyleDisplayName)) -ForegroundColor DarkGray
+        Write-MenuRule -Char '-'
+        Write-MenuItem -Text (Format-MenuLabel -Label "Open" -IsSelected $true) -IsSelected $true -Color $script:MenuHighlightColor -Indent 0
+        Write-MenuItem -Text (Format-MenuLabel -Label "Settings" -IsSelected $false) -IsSelected $false -Color $script:MenuNormalColor -Indent 0
+        Write-MenuItem -Text (Format-MenuLabel -Label "Quit" -IsSelected $false) -IsSelected $false -Color $script:MenuNormalColor -Indent 0
+        Write-Host ""
+        $actionLine = Format-ActionLabel -Label "Copy password"
+        if (-not [string]::IsNullOrWhiteSpace($actionLine)) {
+            Write-Host $actionLine -ForegroundColor $script:MenuNormalColor
+            Write-Host ""
+        }
+        $choice = Read-Host "Use this style? (Y/N)"
+        if ($choice -match '^(?i)y') {
+            Save-UiColorSettings
+            return $true
+        }
+        return $false
+    } finally {
+        if ($choice -notmatch '^(?i)y') {
+            Set-MenuStyle -Style $previous | Out-Null
+        }
+    }
+}
+
+function Show-MenuStyleMenu {
+    while ($true) {
+        $options = @("Clean", "Bracketed", "Action tag", "Back")
+        $choice = Show-ActionMenu -Title "Menu style" -Options $options -Hint "Enter preview/apply, Esc back."
+        if ($null -eq $choice -or $choice -eq "Back") { return }
+        $style = Resolve-MenuStyle -Value $choice
+        if ($null -ne $style) {
+            Invoke-MenuStylePreview -Style $style | Out-Null
+        }
+    }
+}
+
 function Invoke-FontColorPrompt {
     Clear-Host
     Write-Header "Customize Script"
@@ -1726,8 +1838,12 @@ function Format-MenuText {
 
 function Format-ActionLabel {
     param([string]$Label)
-    if ([string]::IsNullOrWhiteSpace($Label)) { return "[Action]" }
-    return "[Action] " + $Label
+    if ([string]::IsNullOrWhiteSpace($Label)) { return "" }
+    switch ($script:MenuStyle) {
+        "ActionTag" { return "[Action] " + $Label }
+        "Bracketed" { return "[Action] " + $Label }
+        default { return $Label }
+    }
 }
 
 function Format-MenuLabel {
@@ -1736,8 +1852,12 @@ function Format-MenuLabel {
         [bool]$IsSelected
     )
     if ($IsSelected) {
-        if ([string]::IsNullOrWhiteSpace($Label)) { return "[Action]" }
-        return ($Label + " [Action]")
+        if ([string]::IsNullOrWhiteSpace($Label)) { return "" }
+        switch ($script:MenuStyle) {
+            "ActionTag" { return ($Label + " [Action]") }
+            "Bracketed" { return ("[" + $Label + "]") }
+            default { return $Label }
+        }
     }
     return $Label
 }
@@ -1769,6 +1889,7 @@ function Start-MenuFrame {
     param([ref]$IsFirstRender)
     if ($IsFirstRender.Value) {
         Clear-Host
+        $script:MenuLastRenderBottom = 0
         $IsFirstRender.Value = $false
         return
     }
@@ -1863,6 +1984,7 @@ function Show-ActionMenu {
                 Write-Host ""
                 Write-Host $Hint -ForegroundColor DarkGray
             }
+            Complete-MenuFrame
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2278,6 +2400,7 @@ function Show-EntryList {
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc back." -ForegroundColor DarkGray
             Write-Host "Type to search, Backspace delete." -ForegroundColor DarkGray
+            Complete-MenuFrame
 
             $skipIndexUpdate = $false
             $key = Read-MenuKey
@@ -2361,6 +2484,7 @@ function Show-AccountPicker {
             Write-MenuItem -Text "Back" -IsSelected $isSelected -Color $color -Indent 0
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc back." -ForegroundColor DarkGray
+            Complete-MenuFrame
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2440,6 +2564,7 @@ function Show-CustomizeMenu {
         $isFirstRender = $true
         while ($true) {
             $actions = @(
+                @{ Label = "Menu style (" + (Get-MenuStyleDisplayName) + ")"; Action = "menu-style" }
                 @{ Label = "Font color"; Action = "font-color" }
                 @{ Label = "Other UI colors"; Action = "ui-colors" }
                 @{ Label = "Reset"; Action = "reset" }
@@ -2462,6 +2587,7 @@ function Show-CustomizeMenu {
             }
             Write-Host ""
             Write-Host "Up/Down move, Enter select, Esc back." -ForegroundColor DarkGray
+            Complete-MenuFrame
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2472,7 +2598,10 @@ function Show-CustomizeMenu {
                 }
                 "Enter" {
                     $action = $actions[$selectedAction].Action
-                    if ($action -eq "font-color") {
+                    if ($action -eq "menu-style") {
+                        Show-MenuStyleMenu
+                        $isFirstRender = $true
+                    } elseif ($action -eq "font-color") {
                         Invoke-FontColorPrompt | Out-Null
                         $isFirstRender = $true
                     } elseif ($action -eq "ui-colors") {
@@ -2557,6 +2686,7 @@ function Show-AccountMenu {
                     }
                     Write-Host ""
                     Write-Host "Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
+                    Complete-MenuFrame
                     $key = Read-MenuKeyWithRefresh -RefreshIntervalMs 700 -OnRefresh {
                         $currentStamp = Get-VaultFilesStamp
                         if ($currentStamp -ne $vaultStamp) {
@@ -2640,6 +2770,7 @@ function Show-EntryDetail {
             }
             Write-Host ""
             Write-Host "Enter copies field or runs action, Esc back." -ForegroundColor DarkGray
+            Complete-MenuFrame
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
