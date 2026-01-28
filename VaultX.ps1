@@ -1340,6 +1340,17 @@ function Write-MenuPrompt {
     Write-Host ""
 }
 
+function Write-MenuTextLine {
+    param(
+        [string]$Text,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+    $width = [Math]::Max(1, (Get-ConsoleWidth))
+    $safeText = Format-MenuText -Text $Text -Max $width
+    $render = $safeText.PadRight($width)
+    Write-Host $render -ForegroundColor $Color
+}
+
 function Write-MenuSeparator {
     param([int]$Indent = 2)
     $width = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
@@ -2256,18 +2267,18 @@ function Show-EntryList {
             $subtitle = $Title
             if ($AccountName) { $subtitle = "$Title - $AccountName" }
             Write-Header $subtitle -ShowBanner
-            Write-Host ("Search: " + $SearchTerm) -ForegroundColor DarkGray
-            Write-Host ""
+            Write-MenuTextLine -Text ("Search: " + $SearchTerm) -Color DarkGray
+            Write-MenuTextLine -Text "" -Color DarkGray
             Write-MenuSeparator -Indent 0
 
             $backColor = if ($selectedPos -eq 0) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
             Write-MenuItem -Text "Back" -IsSelected:($selectedPos -eq 0) -IsActive:$true -Color $backColor
-            Write-Host ""
+            Write-MenuTextLine -Text "" -Color DarkGray
             if ($filtered.Count -eq 0) {
                 if ($Entries.Count -eq 0) {
-                    Write-Host "No entries yet." -ForegroundColor DarkGray
+                    Write-MenuTextLine -Text "No entries yet." -Color DarkGray
                 } else {
-                    Write-Host "No matches for current search." -ForegroundColor DarkGray
+                    Write-MenuTextLine -Text "No matches for current search." -Color DarkGray
                 }
             } else {
                 $footerLines = 5
@@ -2286,7 +2297,7 @@ function Show-EntryList {
                     if ($selectedEntryPos -ge ($start + $maxVisible)) { $start = $selectedEntryPos - $maxVisible + 1 }
                 }
                 $end = [Math]::Min($filtered.Count - 1, $start + $maxVisible - 1)
-                Write-Host "Entries" -ForegroundColor DarkGray
+                Write-MenuTextLine -Text "Entries" -Color DarkGray
                 for ($i = $start; $i -le $end; $i++) {
                     $entry = $filtered[$i]
                     $titleText = Format-DisplayValue $entry.Title 28
@@ -2297,17 +2308,17 @@ function Show-EntryList {
                     $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
                     Write-MenuItem -Text $line -IsSelected $isSelected -Color $color
                 }
-                Write-Host ""
+                Write-MenuTextLine -Text "" -Color DarkGray
                 if ([string]::IsNullOrWhiteSpace($SearchTerm)) {
-                    Write-Host ("Showing {0}-{1} of {2}" -f ($start + 1), ($end + 1), $filtered.Count) -ForegroundColor DarkGray
+                    Write-MenuTextLine -Text ("Showing {0}-{1} of {2}" -f ($start + 1), ($end + 1), $filtered.Count) -Color DarkGray
                 } else {
-                    Write-Host ("Showing {0}-{1} of {2} (total {3})" -f ($start + 1), ($end + 1), $filtered.Count, $Entries.Count) -ForegroundColor DarkGray
+                    Write-MenuTextLine -Text ("Showing {0}-{1} of {2} (total {3})" -f ($start + 1), ($end + 1), $filtered.Count, $Entries.Count) -Color DarkGray
                 }
             }
 
-            Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc back." -ForegroundColor DarkGray
-            Write-Host "Type to search, Backspace delete." -ForegroundColor DarkGray
+            Write-MenuTextLine -Text "" -Color DarkGray
+            Write-MenuTextLine -Text "Up/Down move, Enter select, Esc back." -Color DarkGray
+            Write-MenuTextLine -Text "Type to search, Backspace delete." -Color DarkGray
 
             $skipIndexUpdate = $false
             $key = Read-MenuKey
