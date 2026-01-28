@@ -1317,7 +1317,9 @@ function Clear-VaultSession {
 
 function Get-ConsoleWidth {
     try {
-        return [Console]::WindowWidth
+        $width = [Console]::WindowWidth
+        if ($width -gt 1) { return ($width - 1) }
+        return $width
     } catch {
         return 120
     }
