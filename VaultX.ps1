@@ -1044,7 +1044,7 @@ ____   _________   ____ ___.____  ___________           ____  ___
         $lines = $banner -split "\r?\n"
         foreach ($line in $lines) {
             if ($line -ne "") {
-                Write-Host $line -ForegroundColor $script:MenuBannerColor
+                Write-MenuTextLine -Text $line -Color $script:MenuBannerColor -NoEllipsis
             }
         }
     } catch {
@@ -1066,18 +1066,18 @@ function Write-Header {
     } else {
         "{0} v{1}" -f $script:AppName, $script:AppVersion
     }
-    Write-Host $greeting -ForegroundColor DarkGray
-    Write-Host $hostLine -ForegroundColor DarkGray
+    Write-MenuTextLine -Text $greeting -Color DarkGray
+    Write-MenuTextLine -Text $hostLine -Color DarkGray
     if ($ShowBanner) {
         Write-Banner
-        Write-Host $titleLine -ForegroundColor DarkGray
+        Write-MenuTextLine -Text $titleLine -Color DarkGray
     } else {
-        Write-Host $titleLine -ForegroundColor Cyan
+        Write-MenuTextLine -Text $titleLine -Color Cyan
     }
     if ($Subtitle) {
-        Write-Host $Subtitle -ForegroundColor Gray
+        Write-MenuTextLine -Text $Subtitle -Color Gray
     }
-    Write-Host ""
+    Write-MenuTextLine -Text ""
 }
 
 function Write-CompactHeader {
@@ -1088,17 +1088,17 @@ function Write-CompactHeader {
     if ($ShowBanner) {
         Write-Banner
         if ([string]::IsNullOrWhiteSpace($script:AppVersion)) {
-            Write-Host $script:AppName -ForegroundColor DarkGray
+            Write-MenuTextLine -Text $script:AppName -Color DarkGray
         } else {
-            Write-Host ("{0} v{1}" -f $script:AppName, $script:AppVersion) -ForegroundColor DarkGray
+            Write-MenuTextLine -Text ("{0} v{1}" -f $script:AppName, $script:AppVersion) -Color DarkGray
         }
     } else {
-        Write-Host $script:AppName -ForegroundColor Cyan
+        Write-MenuTextLine -Text $script:AppName -Color Cyan
     }
     if ($Title) {
-        Write-Host $Title -ForegroundColor Gray
+        Write-MenuTextLine -Text $Title -Color Gray
     }
-    Write-Host ""
+    Write-MenuTextLine -Text ""
 }
 
 function Show-Usage {
@@ -1343,10 +1343,21 @@ function Write-MenuPrompt {
 function Write-MenuTextLine {
     param(
         [string]$Text,
-        [ConsoleColor]$Color = [ConsoleColor]::Gray
+        [ConsoleColor]$Color = [ConsoleColor]::Gray,
+        [switch]$NoEllipsis
     )
     $width = [Math]::Max(1, (Get-ConsoleWidth))
-    $safeText = Format-MenuText -Text $Text -Max $width
+    if ($NoEllipsis) {
+        if ([string]::IsNullOrEmpty($Text)) {
+            $safeText = ""
+        } elseif ($Text.Length -le $width) {
+            $safeText = $Text
+        } else {
+            $safeText = $Text.Substring(0, $width)
+        }
+    } else {
+        $safeText = Format-MenuText -Text $Text -Max $width
+    }
     $render = $safeText.PadRight($width)
     Write-Host $render -ForegroundColor $Color
 }
