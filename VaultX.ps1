@@ -1124,8 +1124,25 @@ function Show-Message {
 function Read-MenuKey {
     param([string]$Prompt)
     try {
-        $script:LastMenuFrameHeight = [Console]::CursorTop + 1
-        $script:LastMenuFrameWidth = [Console]::BufferWidth
+        $currentTop = [Console]::CursorTop
+        $currentLeft = [Console]::CursorLeft
+        $currentHeight = $currentTop + 1
+        $currentWidth = [Console]::BufferWidth
+        if ($script:LastMenuFrameHeight -gt $currentHeight -and $currentWidth -gt 0) {
+            [Console]::SetCursorPosition(0, $currentHeight)
+            $blank = (" " * $currentWidth)
+            $clearCount = $script:LastMenuFrameHeight - $currentHeight
+            for ($i = 0; $i -lt $clearCount; $i++) {
+                if ($i -lt ($clearCount - 1)) {
+                    [Console]::Write($blank + "`r`n")
+                } else {
+                    [Console]::Write($blank)
+                }
+            }
+            [Console]::SetCursorPosition($currentLeft, $currentTop)
+        }
+        $script:LastMenuFrameHeight = $currentHeight
+        $script:LastMenuFrameWidth = $currentWidth
     } catch {
     }
     $raw = $null
@@ -1780,21 +1797,6 @@ function Start-MenuFrame {
         return
     }
     try {
-        $height = [Math]::Max(0, $script:LastMenuFrameHeight)
-        $width = [Math]::Max(1, $script:LastMenuFrameWidth)
-        if ($height -le 0 -or $width -le 1) {
-            $width = [Math]::Max(1, [Console]::BufferWidth)
-            $height = [Math]::Max(1, [Console]::BufferHeight)
-        }
-        [Console]::SetCursorPosition(0, 0)
-        $blank = (" " * $width)
-        for ($i = 0; $i -lt $height; $i++) {
-            if ($i -lt ($height - 1)) {
-                [Console]::Write($blank + "`r`n")
-            } else {
-                [Console]::Write($blank)
-            }
-        }
         [Console]::SetCursorPosition(0, 0)
     } catch {
         Clear-Host
