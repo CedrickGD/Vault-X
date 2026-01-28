@@ -31,6 +31,8 @@ $script:DefaultMenuHighlightColor = $script:MenuHighlightColor
 $script:DefaultMenuSeparatorColor = $script:MenuSeparatorColor
 $script:DefaultMenuDisabledColor = $script:MenuDisabledColor
 $script:DefaultHostForegroundColor = $null
+$script:LastMenuFrameHeight = 0
+$script:LastMenuFrameWidth = 0
 try {
     if ($Host -and $Host.UI -and $Host.UI.RawUI) {
         $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
@@ -1121,6 +1123,11 @@ function Show-Message {
 
 function Read-MenuKey {
     param([string]$Prompt)
+    try {
+        $script:LastMenuFrameHeight = [Console]::CursorTop + 1
+        $script:LastMenuFrameWidth = [Console]::BufferWidth
+    } catch {
+    }
     $raw = $null
     try {
         $raw = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
@@ -1773,6 +1780,21 @@ function Start-MenuFrame {
         return
     }
     try {
+        $height = [Math]::Max(0, $script:LastMenuFrameHeight)
+        $width = [Math]::Max(1, $script:LastMenuFrameWidth)
+        if ($height -le 0 -or $width -le 1) {
+            $width = [Math]::Max(1, [Console]::BufferWidth)
+            $height = [Math]::Max(1, [Console]::BufferHeight)
+        }
+        [Console]::SetCursorPosition(0, 0)
+        $blank = (" " * $width)
+        for ($i = 0; $i -lt $height; $i++) {
+            if ($i -lt ($height - 1)) {
+                [Console]::Write($blank + "`r`n")
+            } else {
+                [Console]::Write($blank)
+            }
+        }
         [Console]::SetCursorPosition(0, 0)
     } catch {
         Clear-Host
