@@ -31,8 +31,8 @@ $script:DefaultMenuHighlightColor = $script:MenuHighlightColor
 $script:DefaultMenuSeparatorColor = $script:MenuSeparatorColor
 $script:DefaultMenuDisabledColor = $script:MenuDisabledColor
 $script:DefaultHostForegroundColor = $null
-$script:LastMenuFrameHeight = 0
-$script:LastMenuFrameWidth = 0
+$script:FrameBufferActive = $false
+$script:FrameBufferLines = @()
 try {
     if ($Host -and $Host.UI -and $Host.UI.RawUI) {
         $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
@@ -1121,30 +1121,62 @@ function Show-Message {
     Start-Sleep -Milliseconds 900
 }
 
+function Render-MenuFrame {
+    if (-not $script:FrameBufferActive) { return }
+    try {
+        $width = [Math]::Max(1, (Get-ConsoleWidth))
+        $height = [Math]::Max(1, (Get-ConsoleHeight))
+        [Console]::SetCursorPosition(0, 0)
+        $defaultColor = [Console]::ForegroundColor
+        for ($i = 0; $i -lt $height; $i++) {
+            $lineText = ""
+            $lineColor = $defaultColor
+            if ($i -lt $script:FrameBufferLines.Count) {
+                $lineText = $script:FrameBufferLines[$i].Text
+                $lineColor = $script:FrameBufferLines[$i].Color
+            }
+            if ($lineText.Length -gt $width) {
+                $lineText = $lineText.Substring(0, $width)
+            }
+            $render = $lineText.PadRight($width)
+            if ($lineColor -ne $null) {
+                [Console]::ForegroundColor = $lineColor
+            }
+            [Console]::Write($render)
+            if ($i -lt ($height - 1)) {
+                [Console]::Write("`r`n")
+            }
+        }
+        [Console]::ForegroundColor = $defaultColor
+    } catch {
+        Clear-Host
+        foreach ($line in $script:FrameBufferLines) {
+            Write-Host $line.Text -ForegroundColor $line.Color
+        }
+    } finally {
+        $script:FrameBufferLines = @()
+        $script:FrameBufferActive = $false
+    }
+}
+
+function Add-MenuFrameLine {
+    param(
+        [string]$Text,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+    if ($script:FrameBufferActive) {
+        $script:FrameBufferLines += [pscustomobject]@{
+            Text = $Text
+            Color = $Color
+        }
+        return
+    }
+    Write-Host $Text -ForegroundColor $Color
+}
+
 function Read-MenuKey {
     param([string]$Prompt)
-    try {
-        $currentTop = [Console]::CursorTop
-        $currentLeft = [Console]::CursorLeft
-        $currentHeight = $currentTop + 1
-        $currentWidth = [Console]::BufferWidth
-        if ($script:LastMenuFrameHeight -gt $currentHeight -and $currentWidth -gt 0) {
-            [Console]::SetCursorPosition(0, $currentHeight)
-            $blank = (" " * $currentWidth)
-            $clearCount = $script:LastMenuFrameHeight - $currentHeight
-            for ($i = 0; $i -lt $clearCount; $i++) {
-                if ($i -lt ($clearCount - 1)) {
-                    [Console]::Write($blank + "`r`n")
-                } else {
-                    [Console]::Write($blank)
-                }
-            }
-            [Console]::SetCursorPosition($currentLeft, $currentTop)
-        }
-        $script:LastMenuFrameHeight = $currentHeight
-        $script:LastMenuFrameWidth = $currentWidth
-    } catch {
-    }
+    Render-MenuFrame
     $raw = $null
     try {
         $raw = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
@@ -1215,6 +1247,7 @@ function Read-MenuKeyWithRefresh {
         [int]$ChangePollMs = 100,
         [scriptblock]$OnChange
     )
+    Render-MenuFrame
     $hasRefresh = ($RefreshIntervalMs -gt 0 -and $null -ne $OnRefresh)
     $hasChange = ($null -ne $Watcher -and $null -ne $OnChange)
     if (-not $hasRefresh -and -not $hasChange) { return Read-MenuKey }
@@ -1359,7 +1392,7 @@ function Write-MenuTextLine {
         $safeText = Format-MenuText -Text $Text -Max $width
     }
     $render = $safeText.PadRight($width)
-    Write-Host $render -ForegroundColor $Color
+    Add-MenuFrameLine -Text $render -Color $Color
 }
 
 function Write-MenuSeparator {
@@ -1373,8 +1406,8 @@ function Write-MenuSeparator {
     if ($line.Length -gt $width) {
         $line = $line.Substring(0, $width)
     }
-    if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-    Write-Host $line -ForegroundColor $script:MenuSeparatorColor
+    if ($Indent -gt 0) { $line = (" " * $Indent) + $line }
+    Add-MenuFrameLine -Text $line -Color $script:MenuSeparatorColor
 }
 
 function Write-MenuHelpHint {
@@ -1809,17 +1842,22 @@ function Write-MenuRule {
     )
     $width = [Math]::Max(10, (Get-ConsoleWidth) - $Indent)
     $line = ($Char.ToString() * $width)
-    if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-    Write-Host $line -ForegroundColor $script:MenuSeparatorColor
+    if ($Indent -gt 0) { $line = (" " * $Indent) + $line }
+    Add-MenuFrameLine -Text $line -Color $script:MenuSeparatorColor
 }
 
 function Start-MenuFrame {
     param([ref]$IsFirstRender)
     if ($IsFirstRender.Value) {
-        Clear-Host
+        try {
+            [Console]::SetCursorPosition(0, 0)
+        } catch {
+            Clear-Host
+        }
         $IsFirstRender.Value = $false
-        return
     }
+    $script:FrameBufferLines = @()
+    $script:FrameBufferActive = $true
     try {
         [Console]::SetCursorPosition(0, 0)
     } catch {
@@ -1848,8 +1886,8 @@ function Write-MenuItem {
         $width = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
         $padding = [Math]::Max(0, [Math]::Floor(($width - $line.Length) / 2))
         $render = ((" " * $padding) + $line).PadRight($width)
-        if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-        Write-Host $render -ForegroundColor $Color
+        if ($Indent -gt 0) { $render = (" " * $Indent) + $render }
+        Add-MenuFrameLine -Text $render -Color $Color
         return
     }
     if ($BlockWidth -gt 0) {
@@ -1859,16 +1897,16 @@ function Write-MenuItem {
         $screenWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
         $padding = [Math]::Max(0, [Math]::Floor(($screenWidth - $width) / 2))
         $render = ((" " * $padding) + $line).PadRight($screenWidth)
-        if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-        Write-Host $render -ForegroundColor $Color
+        if ($Indent -gt 0) { $render = (" " * $Indent) + $render }
+        Add-MenuFrameLine -Text $render -Color $Color
         return
     }
     $prefix = if ($IsSelected) { "$script:MenuPointerSymbol " } else { "  " }
     $line = $prefix + $safeText
     $renderWidth = [Math]::Max(10, $consoleWidth - $Indent)
     $render = $line.PadRight($renderWidth)
-    if ($Indent -gt 0) { Write-Host (" " * $Indent) -NoNewline }
-    Write-Host $render -ForegroundColor $Color
+    if ($Indent -gt 0) { $render = (" " * $Indent) + $render }
+    Add-MenuFrameLine -Text $render -Color $Color
 }
 
 function Show-ActionMenu {
@@ -1896,8 +1934,8 @@ function Show-ActionMenu {
                 Write-Header $Title -ShowBanner:$ShowBanner
             }
             if ($Subtitle) {
-                Write-Host $Subtitle -ForegroundColor DarkGray
-                Write-Host ""
+                Write-MenuTextLine -Text $Subtitle -Color DarkGray
+                Write-MenuTextLine -Text ""
             }
             $ruleChar = if ($Title -eq "Main Menu") { '=' } else { '-' }
             Write-MenuRule -Char $ruleChar
@@ -1908,8 +1946,8 @@ function Show-ActionMenu {
                 Write-MenuItem -Text $line -IsSelected $isSelected -Color $color -Indent 0
             }
             if (-not [string]::IsNullOrWhiteSpace($Hint)) {
-                Write-Host ""
-                Write-Host $Hint -ForegroundColor DarkGray
+                Write-MenuTextLine -Text ""
+                Write-MenuTextLine -Text $Hint -Color DarkGray
             }
             $key = Read-MenuKey
             switch ($key.Key) {
@@ -2400,7 +2438,7 @@ function Show-AccountPicker {
         while ($true) {
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header $Title -ShowBanner
-            Write-Host ""
+            Write-MenuTextLine -Text ""
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $Accounts.Count; $i++) {
                 $isSelected = ($i -eq $selected)
@@ -2411,8 +2449,8 @@ function Show-AccountPicker {
             $isSelected = ($selected -eq $backIndex)
             $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
             Write-MenuItem -Text "Back" -IsSelected $isSelected -Color $color -Indent 0
-            Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc back." -ForegroundColor DarkGray
+            Write-MenuTextLine -Text ""
+            Write-MenuTextLine -Text "Up/Down move, Enter select, Esc back." -Color DarkGray
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2503,8 +2541,8 @@ function Show-CustomizeMenu {
 
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
             Write-Header "Customize Script"
-            Write-Host ("Current font color: " + $script:MenuNormalColor) -ForegroundColor DarkGray
-            Write-Host ""
+            Write-MenuTextLine -Text ("Current font color: " + $script:MenuNormalColor) -Color DarkGray
+            Write-MenuTextLine -Text ""
             Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $actions.Count; $i++) {
                 $action = $actions[$i]
@@ -2512,8 +2550,8 @@ function Show-CustomizeMenu {
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
                 Write-MenuItem -Text (Format-MenuLabel -Label $action.Label -IsSelected $isSelected) -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
-            Write-Host ""
-            Write-Host "Up/Down move, Enter select, Esc back." -ForegroundColor DarkGray
+            Write-MenuTextLine -Text ""
+            Write-MenuTextLine -Text "Up/Down move, Enter select, Esc back." -Color DarkGray
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
@@ -2594,12 +2632,12 @@ function Show-AccountMenu {
                     Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
                     Write-Header "Main Menu" -ShowBanner
                     if ($accounts.Count -eq 0) {
-                        Write-Host "No vaults yet." -ForegroundColor DarkGray
+                        Write-MenuTextLine -Text "No vaults yet." -Color DarkGray
                     } else {
                         $names = $accounts | ForEach-Object { $_.Name } | Sort-Object
-                        Write-Host ("Vaults: " + ($names -join ", ")) -ForegroundColor DarkGray
+                        Write-MenuTextLine -Text ("Vaults: " + ($names -join ", ")) -Color DarkGray
                     }
-                    Write-Host ""
+                    Write-MenuTextLine -Text ""
                     Write-MenuRule -Char '='
                     for ($i = 0; $i -lt $actions.Count; $i++) {
                         $action = $actions[$i]
@@ -2607,8 +2645,8 @@ function Show-AccountMenu {
                         $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
                         Write-MenuItem -Text (Format-MenuLabel -Label $action.Label -IsSelected $isSelected) -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
                     }
-                    Write-Host ""
-                    Write-Host "Up/Down move, Enter select, Esc quit." -ForegroundColor DarkGray
+                    Write-MenuTextLine -Text ""
+                    Write-MenuTextLine -Text "Up/Down move, Enter select, Esc quit." -Color DarkGray
                     $key = Read-MenuKeyWithRefresh -RefreshIntervalMs 700 -OnRefresh {
                         $currentStamp = Get-VaultFilesStamp
                         if ($currentStamp -ne $vaultStamp) {
@@ -2690,8 +2728,8 @@ function Show-EntryDetail {
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
                 Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$true -Color $color
             }
-            Write-Host ""
-            Write-Host "Enter copies field or runs action, Esc back." -ForegroundColor DarkGray
+            Write-MenuTextLine -Text ""
+            Write-MenuTextLine -Text "Enter copies field or runs action, Esc back." -Color DarkGray
             $key = Read-MenuKey
             switch ($key.Key) {
                 "UpArrow" {
