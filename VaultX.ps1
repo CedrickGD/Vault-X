@@ -2270,7 +2270,11 @@ function Show-EntryList {
                     Write-Host "No matches for current search." -ForegroundColor DarkGray
                 }
             } else {
-                $maxVisible = [Math]::Max(5, (Get-ConsoleHeight) - 18)
+                $footerLines = 5
+                $cursorTop = 0
+                try { $cursorTop = [Console]::CursorTop } catch { $cursorTop = 0 }
+                $available = (Get-ConsoleHeight) - $cursorTop - $footerLines
+                $maxVisible = [Math]::Max(3, $available)
                 if ($filtered.Count -le $maxVisible) {
                     $start = 0
                 } else {
