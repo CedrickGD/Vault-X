@@ -33,6 +33,7 @@ $script:DefaultMenuDisabledColor = $script:MenuDisabledColor
 $script:DefaultHostForegroundColor = $null
 $script:FrameBufferActive = $false
 $script:FrameBufferLines = @()
+$script:LastFrameLineCount = 0
 try {
     if ($Host -and $Host.UI -and $Host.UI.RawUI) {
         $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
@@ -1126,6 +1127,10 @@ function Render-MenuFrame {
     try {
         $width = [Math]::Max(1, (Get-ConsoleWidth))
         $height = [Math]::Max(1, (Get-ConsoleHeight))
+        $script:LastFrameLineCount = 0
+        if ($null -ne $script:FrameBufferLines) {
+            $script:LastFrameLineCount = $script:FrameBufferLines.Count
+        }
         [Console]::SetCursorPosition(0, 0)
         $defaultColor = [Console]::ForegroundColor
         for ($i = 0; $i -lt $height; $i++) {
@@ -1148,6 +1153,11 @@ function Render-MenuFrame {
             }
         }
         [Console]::ForegroundColor = $defaultColor
+        try {
+            $targetRow = [Math]::Min([Math]::Max(0, $script:LastFrameLineCount), [Math]::Max(0, $height - 1))
+            [Console]::SetCursorPosition(0, $targetRow)
+        } catch {
+        }
     } catch {
         Clear-Host
         foreach ($line in $script:FrameBufferLines) {
@@ -1816,11 +1826,11 @@ function Format-MenuLabel {
         [string]$Label,
         [bool]$IsSelected
     )
+    if ([string]::IsNullOrWhiteSpace($Label)) { return "" }
     if ($IsSelected) {
-        if ([string]::IsNullOrWhiteSpace($Label)) { return "[Action]" }
-        return ($Label + " [Action]")
+        return ("[{0}]" -f $Label)
     }
-    return $Label
+    return (" {0} " -f $Label)
 }
 
 function Get-MenuBlockWidth {
@@ -2331,10 +2341,16 @@ function Show-EntryList {
                 }
             } else {
                 $footerLines = 5
-                $cursorTop = 0
-                try { $cursorTop = [Console]::CursorTop } catch { $cursorTop = 0 }
-                $available = (Get-ConsoleHeight) - $cursorTop - $footerLines
-                $maxVisible = [Math]::Max(3, $available)
+                Write-MenuTextLine -Text "Entries" -Color DarkGray
+                $headerLines = 0
+                if ($script:FrameBufferActive -and $null -ne $script:FrameBufferLines) {
+                    $headerLines = $script:FrameBufferLines.Count
+                } else {
+                    try { $headerLines = [Console]::CursorTop } catch { $headerLines = 0 }
+                }
+                $available = (Get-ConsoleHeight) - $headerLines - $footerLines
+                if ($available -lt 1) { $available = 1 }
+                $maxVisible = $available
                 if ($filtered.Count -le $maxVisible) {
                     $start = 0
                 } else {
@@ -2346,7 +2362,6 @@ function Show-EntryList {
                     if ($selectedEntryPos -ge ($start + $maxVisible)) { $start = $selectedEntryPos - $maxVisible + 1 }
                 }
                 $end = [Math]::Min($filtered.Count - 1, $start + $maxVisible - 1)
-                Write-MenuTextLine -Text "Entries" -Color DarkGray
                 for ($i = $start; $i -le $end; $i++) {
                     $entry = $filtered[$i]
                     $titleText = Format-DisplayValue $entry.Title 28
@@ -2443,12 +2458,12 @@ function Show-AccountPicker {
             for ($i = 0; $i -lt $Accounts.Count; $i++) {
                 $isSelected = ($i -eq $selected)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text $Accounts[$i].Name -IsSelected $isSelected -Color $color -Indent 0
+                Write-MenuItem -Text (Format-MenuLabel -Label $Accounts[$i].Name -IsSelected $isSelected) -IsSelected $isSelected -Color $color -Indent 0
             }
             $backIndex = $Accounts.Count
             $isSelected = ($selected -eq $backIndex)
             $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-            Write-MenuItem -Text "Back" -IsSelected $isSelected -Color $color -Indent 0
+            Write-MenuItem -Text (Format-MenuLabel -Label "Back" -IsSelected $isSelected) -IsSelected $isSelected -Color $color -Indent 0
             Write-MenuTextLine -Text ""
             Write-MenuTextLine -Text "Up/Down move, Enter select, Esc back." -Color DarkGray
             $key = Read-MenuKey
@@ -2704,7 +2719,7 @@ function Show-EntryDetail {
         $items += @{ Type = "field"; Field = $field }
     }
     if (-not [string]::IsNullOrWhiteSpace($Entry.Url)) {
-        $items += @{ Type = "action"; Label = "Open link" }
+        $items += @{ Type = "action"; Label = "Open Url" }
     }
     $items += @{ Type = "action"; Label = "Back" }
     $selected = 0
@@ -2755,7 +2770,7 @@ function Show-EntryDetail {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
                         }
-                    } elseif ($item.Label -eq "Open link") {
+                    } elseif ($item.Label -eq "Open Url") {
                         Open-WebUrl -Url $Entry.Url
                     } elseif ($item.Label -eq "Back") {
                         return "back"
