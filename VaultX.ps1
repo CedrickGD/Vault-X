@@ -138,6 +138,18 @@ function Write-Log {
     }
 }
 
+function ConvertFrom-JsonSafe {
+    param(
+        [string]$Json,
+        [int]$Depth = 6
+    )
+    $command = Get-Command ConvertFrom-Json -ErrorAction SilentlyContinue
+    if ($null -ne $command -and $command.Parameters.ContainsKey("Depth")) {
+        return ($Json | ConvertFrom-Json -Depth $Depth)
+    }
+    return ($Json | ConvertFrom-Json)
+}
+
 function Wait-ForExit {
     param([string]$Prompt = "Press Enter to close VaultX.")
     try {
@@ -396,6 +408,16 @@ function Get-AccountFileName {
     return ("vault_{0}_{1}.json" -f $safe, $short)
 }
 
+function Get-SafeFileBaseName {
+    param([string]$Name, [string]$Fallback = "vault")
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $Fallback }
+    $safe = $Name.Trim() -replace '[\\/:*?"<>|]', '_'
+    $safe = $safe -replace '\s+', '_'
+    $safe = $safe -replace '\.+$', ''
+    if ([string]::IsNullOrWhiteSpace($safe)) { return $Fallback }
+    return $safe
+}
+
 function Get-Accounts {
     $path = Get-AccountsPath
     if (-not (Test-Path $path)) { return @() }
@@ -628,39 +650,139 @@ function Remove-Account {
 function Export-VaultData {
     param(
         [string]$AccountName,
-        $VaultData
+        $VaultData,
+        $VaultMeta,
+        [string]$VaultPath,
+        [byte[]]$VaultKey,
+        [byte[]]$VaultMacKey
     )
-    Clear-Host
-    Write-Header "Export vault"
-    $destination = Read-Host "Export file path (Enter to abort)"
-    if ([string]::IsNullOrWhiteSpace($destination)) { return $false }
-    $destination = $destination.Trim()
-    $extension = [IO.Path]::GetExtension($destination)
-    if ([string]::IsNullOrWhiteSpace($extension)) {
-        $destination = "$destination.json"
-    }
-    $destinationDir = Split-Path -Parent $destination
-    if ([string]::IsNullOrWhiteSpace($destinationDir)) {
-        $destinationDir = $PWD.Path
-    }
-    if (-not (Test-PathSafe -Path $destinationDir)) {
-        Show-Message "Export path is invalid." ([ConsoleColor]::Red)
+    if (-not (Confirm-VaultTwoFactor -VaultPath $VaultPath -Meta $VaultMeta -Data $VaultData -Key $VaultKey -MacKey $VaultMacKey -IgnoreTrust -Reason "Export requires a 2FA check.")) {
         return $false
     }
-    $exportPassword = Read-ConfirmedSecret -Title "Export vault" -Prompt "Create export password" -ConfirmPrompt "Confirm export password"
-    if ([string]::IsNullOrEmpty($exportPassword)) { return $false }
-    $salt = New-RandomBytes 16
-    $iterations = 100000
-    $key = Get-KeyFromPassword -Password $exportPassword -Salt $salt -Iterations $iterations
+    Clear-Host
+    Write-Header "Export vault"
+    $baseName = Get-SafeFileBaseName -Name $AccountName -Fallback "vault"
+    $defaultName = "{0}_export.json" -f $baseName
+    $destination = $null
+    while ($true) {
+        $choice = Show-ActionMenu -Title "Export location" -Options @("Desktop", "Downloads", "Custom path", "Back") -Subtitle "Choose a destination folder."
+        if ($null -eq $choice -or $choice -eq "Back") { return $false }
+        if ($choice -eq "Desktop" -or $choice -eq "Downloads") {
+            $baseDir = if ($choice -eq "Desktop") { Get-DesktopFolder } else { Get-DownloadsFolder }
+            if ([string]::IsNullOrWhiteSpace($baseDir) -or -not (Test-PathSafe -Path $baseDir)) {
+                Show-Message "Selected folder is unavailable." ([ConsoleColor]::Red)
+                continue
+            }
+            $destination = Join-Path $baseDir $defaultName
+        } else {
+            $inputPath = Read-Host "Export folder path (Enter to abort)"
+            if ([string]::IsNullOrWhiteSpace($inputPath)) { return $false }
+            $inputPath = $inputPath.Trim()
+            $lower = $inputPath.ToLowerInvariant()
+            if ($lower -eq '$desktop' -or $lower -eq "desktop") {
+                $baseDir = Get-DesktopFolder
+                if ([string]::IsNullOrWhiteSpace($baseDir)) {
+                    Show-Message "Desktop folder unavailable." ([ConsoleColor]::Red)
+                    continue
+                }
+                $destination = Join-Path $baseDir $defaultName
+            } elseif ($lower -eq '$downloads' -or $lower -eq "downloads") {
+                $baseDir = Get-DownloadsFolder
+                if ([string]::IsNullOrWhiteSpace($baseDir)) {
+                    Show-Message "Downloads folder unavailable." ([ConsoleColor]::Red)
+                    continue
+                }
+                $destination = Join-Path $baseDir $defaultName
+            } else {
+                $destination = [Environment]::ExpandEnvironmentVariables($inputPath)
+                $destination = $destination.Trim()
+                $candidateDir = $null
+                if (Test-PathSafe -Path $destination) {
+                    try {
+                        $item = Get-Item -LiteralPath $destination -ErrorAction Stop
+                        if ($item.PSIsContainer) {
+                            $candidateDir = $destination
+                        } else {
+                            $candidateDir = Split-Path -Parent $destination
+                        }
+                    } catch {
+                    }
+                }
+                if ($null -eq $candidateDir) {
+                    if ($destination.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+                        $candidateDir = $destination
+                    } elseif (-not [string]::IsNullOrWhiteSpace([IO.Path]::GetExtension($destination))) {
+                        $candidateDir = Split-Path -Parent $destination
+                    } else {
+                        $candidateDir = $destination
+                    }
+                }
+                if ([string]::IsNullOrWhiteSpace($candidateDir) -or -not (Test-PathSafe -Path $candidateDir)) {
+                    Show-Message "Export path is invalid." ([ConsoleColor]::Red)
+                    $destination = $null
+                    continue
+                }
+                $destination = Join-Path $candidateDir $defaultName
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($destination)) {
+            Show-Message "Export path is invalid." ([ConsoleColor]::Red)
+            continue
+        }
+        $destinationDir = Split-Path -Parent $destination
+        if ([string]::IsNullOrWhiteSpace($destinationDir)) {
+            $destinationDir = $PWD.Path
+        }
+        if (-not (Test-PathSafe -Path $destinationDir)) {
+            Show-Message "Export path is invalid." ([ConsoleColor]::Red)
+            $destination = $null
+            continue
+        }
+        break
+    }
+    $exportChoice = Show-ActionMenu -Title "Export protection" -Options @("Use master password", "Create export password", "Back") -Subtitle "Choose how to protect the export file."
+    if ($null -eq $exportChoice -or $exportChoice -eq "Back") { return $false }
+
+    $exportKey = $null
+    $exportMacKey = $null
+    $salt = $null
+    $iterations = $null
+    if ($exportChoice -eq "Use master password") {
+        $exportKey = $VaultKey
+        $exportMacKey = $VaultMacKey
+        if ($null -eq $exportKey -or $exportKey.Length -ne 32) {
+            Show-Message "Export keys unavailable in this session." ([ConsoleColor]::Red)
+            return $false
+        }
+        $salt = [Convert]::FromBase64String($VaultMeta.Salt)
+        $iterations = [int]$VaultMeta.Iterations
+    } else {
+        $exportPassword = Read-ConfirmedSecret -Title "Export vault" -Prompt "Create export password" -ConfirmPrompt "Confirm export password"
+        if ([string]::IsNullOrEmpty($exportPassword)) { return $false }
+        $salt = New-RandomBytes 16
+        $iterations = 100000
+        $pair = Get-KeyPairFromPassword -Password $exportPassword -Salt $salt -Iterations $iterations
+        if ($null -eq $pair) {
+            Show-Message "Unable to derive export key." ([ConsoleColor]::Red)
+            return $false
+        }
+        $exportKey = $pair.EncKey
+        $exportMacKey = $pair.MacKey
+    }
+
+    $exportData = Copy-VaultData -VaultData $VaultData
+    Remove-VaultTotpSecret -VaultData $exportData
     $meta = [ordered]@{
-        Version = 1
+        Version = 2
+        VaultId = [guid]::NewGuid().ToString()
         AccountName = $AccountName
         Salt = [Convert]::ToBase64String($salt)
         Iterations = $iterations
         IV = ""
         Data = ""
     }
-    Save-Vault -VaultPath $destination -Key $key -Meta $meta -Data $VaultData
+    Save-Vault -VaultPath $destination -Key $exportKey -MacKey $exportMacKey -Meta $meta -Data $exportData
     Show-Message "Vault exported." ([ConsoleColor]::Green)
     return $true
 }
@@ -866,29 +988,41 @@ function Confirm-AccountPassword {
         }
         $password = Read-SecurePlain "Master password (Enter to abort)"
         if ([string]::IsNullOrEmpty($password)) { return $false }
-        $key = Get-KeyFromPassword -Password $password -Salt $salt -Iterations $iterations
+        $pair = Get-KeyPairFromPassword -Password $password -Salt $salt -Iterations $iterations
+        if ($null -eq $pair) {
+            Show-Message "Unable to derive vault key." ([ConsoleColor]::Red)
+            return $false
+        }
         try {
-            $null = Get-DataFromMeta -Meta $meta -Key $key
+            $null = Get-DataFromMeta -Meta $meta -Key $pair.EncKey -MacKey $pair.MacKey
             $password = $null
             return $true
         } catch {
-            Show-Message "Invalid password." ([ConsoleColor]::Red)
+            Show-Message "Invalid password or vault corrupted." ([ConsoleColor]::Red)
             if ($recoveryAvailable) {
                 $choice = Show-ActionMenu -Title "Password check failed" -Options @("Retry", "Recovery", "Abort") -Subtitle "A recovery password is configured for this vault."
                 if ($choice -eq "Recovery") {
                     $recoveryPassword = Read-SecurePlain "Recovery password (Enter to abort)"
                     if ([string]::IsNullOrEmpty($recoveryPassword)) { return $false }
-                    $masterKey = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
+                    $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
                     $recoveryPassword = $null
-                    if ($null -eq $masterKey) {
-                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                    if ($null -eq $recoveryMaterial) {
+                        Show-Message "Invalid recovery password or vault corrupted." ([ConsoleColor]::Red)
                         continue
                     }
                     try {
-                        $null = Get-DataFromMeta -Meta $meta -Key $masterKey
+                        $recoveryPair = Split-KeyMaterial -Material $recoveryMaterial
+                        if ($null -eq $recoveryPair) {
+                            $recoveryPair = @{ EncKey = $recoveryMaterial; MacKey = $null }
+                        }
+                        if ((Test-VaultMacRequired -Meta $meta) -and ($null -eq $recoveryPair.MacKey)) {
+                            Show-Message "Recovery password must be updated to unlock this vault." ([ConsoleColor]::Red)
+                            continue
+                        }
+                        $null = Get-DataFromMeta -Meta $meta -Key $recoveryPair.EncKey -MacKey $recoveryPair.MacKey
                         return $true
                     } catch {
-                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                        Show-Message "Invalid recovery password or vault corrupted." ([ConsoleColor]::Red)
                     }
                 } elseif ($null -eq $choice -or $choice -eq "Abort") {
                     return $false
@@ -900,6 +1034,80 @@ function Confirm-AccountPassword {
     }
 }
 
+function Get-KeyMaterialFromPassword {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingPlainTextForPassword", "", Justification = "Password is used to derive encryption material and cleared from memory.")]
+    param(
+        [string]$Password,
+        [byte[]]$Salt,
+        [int]$Iterations,
+        [int]$Length
+    )
+    $derive = New-Object Security.Cryptography.Rfc2898DeriveBytes($Password, $Salt, $Iterations)
+    try {
+        return $derive.GetBytes($Length)
+    } finally {
+        $derive.Dispose()
+    }
+}
+
+function Get-DesktopFolder {
+    try {
+        $path = [Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)
+        if (-not [string]::IsNullOrWhiteSpace($path)) { return $path }
+    } catch {
+    }
+    return $null
+}
+
+function Get-DownloadsFolder {
+    try {
+        $path = [Environment]::GetFolderPath([Environment+SpecialFolder]::Downloads)
+        if (-not [string]::IsNullOrWhiteSpace($path)) { return $path }
+    } catch {
+    }
+    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($profile)) { return $null }
+    $fallback = Join-Path $profile "Downloads"
+    if (Test-PathSafe -Path $fallback) { return $fallback }
+    return $profile
+}
+
+function Split-KeyMaterial {
+    param([byte[]]$Material)
+    if ($null -eq $Material -or $Material.Length -lt 64) { return $null }
+    $encKey = New-Object byte[] 32
+    $macKey = New-Object byte[] 32
+    [Buffer]::BlockCopy($Material, 0, $encKey, 0, 32)
+    [Buffer]::BlockCopy($Material, 32, $macKey, 0, 32)
+    return @{ EncKey = $encKey; MacKey = $macKey }
+}
+
+function Get-KeyPairFromPassword {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingPlainTextForPassword", "", Justification = "Password is used to derive encryption material and cleared from memory.")]
+    param(
+        [string]$Password,
+        [byte[]]$Salt,
+        [int]$Iterations
+    )
+    $material = Get-KeyMaterialFromPassword -Password $Password -Salt $Salt -Iterations $Iterations -Length 64
+    $pair = Split-KeyMaterial -Material $material
+    if ($null -eq $pair) { return $null }
+    return $pair
+}
+
+function Get-CombinedKeyMaterial {
+    param(
+        [byte[]]$EncKey,
+        [byte[]]$MacKey
+    )
+    if ($null -eq $EncKey -or $EncKey.Length -ne 32) { return $null }
+    if ($null -eq $MacKey -or $MacKey.Length -ne 32) { return $EncKey }
+    $material = New-Object byte[] 64
+    [Buffer]::BlockCopy($EncKey, 0, $material, 0, 32)
+    [Buffer]::BlockCopy($MacKey, 0, $material, 32, 32)
+    return $material
+}
+
 function Get-KeyFromPassword {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingPlainTextForPassword", "", Justification = "Password is used to derive an encryption key and cleared from memory.")]
     param(
@@ -907,12 +1115,134 @@ function Get-KeyFromPassword {
         [byte[]]$Salt,
         [int]$Iterations
     )
-    $derive = New-Object Security.Cryptography.Rfc2898DeriveBytes($Password, $Salt, $Iterations)
-    try {
-        return $derive.GetBytes(32)
-    } finally {
-        $derive.Dispose()
+    return (Get-KeyMaterialFromPassword -Password $Password -Salt $Salt -Iterations $Iterations -Length 32)
+}
+
+function Get-VaultVersion {
+    param($Meta)
+    if ($null -eq $Meta) { return 1 }
+    $raw = Get-VaultMetaValue -Meta $Meta -Name "Version"
+    if ($null -eq $raw) { return 1 }
+    $version = 0
+    if ([int]::TryParse($raw.ToString(), [ref]$version)) {
+        if ($version -lt 1) { return 1 }
+        return $version
     }
+    return 1
+}
+
+function Get-VaultMetaValue {
+    param(
+        $Meta,
+        [string]$Name
+    )
+    if ($null -eq $Meta -or [string]::IsNullOrWhiteSpace($Name)) { return $null }
+    if ($Meta -is [System.Collections.IDictionary]) {
+        if ($Meta.Contains($Name)) { return $Meta[$Name] }
+        return $null
+    }
+    if ($Meta.PSObject.Properties.Match($Name).Count -gt 0) {
+        return $Meta.$Name
+    }
+    return $null
+}
+
+function Set-VaultMetaValue {
+    param(
+        $Meta,
+        [string]$Name,
+        $Value
+    )
+    if ($null -eq $Meta -or [string]::IsNullOrWhiteSpace($Name)) { return }
+    if ($Meta -is [System.Collections.IDictionary]) {
+        $Meta[$Name] = $Value
+        return
+    }
+    $Meta | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force
+}
+
+function Remove-VaultMetaValue {
+    param(
+        $Meta,
+        [string]$Name
+    )
+    if ($null -eq $Meta -or [string]::IsNullOrWhiteSpace($Name)) { return }
+    if ($Meta -is [System.Collections.IDictionary]) {
+        $Meta.Remove($Name) | Out-Null
+        return
+    }
+    $Meta.PSObject.Properties.Remove($Name)
+}
+
+function Ensure-VaultId {
+    param($Meta)
+    $current = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
+    if ([string]::IsNullOrWhiteSpace($current)) {
+        $current = [guid]::NewGuid().ToString()
+        Set-VaultMetaValue -Meta $Meta -Name "VaultId" -Value $current
+    }
+    return $current
+}
+
+function Test-VaultMacRequired {
+    param($Meta)
+    $version = Get-VaultVersion -Meta $Meta
+    if ($version -ge 2) { return $true }
+    $mac = Get-VaultMetaValue -Meta $Meta -Name "Mac"
+    if ($Meta -and -not [string]::IsNullOrWhiteSpace($mac)) { return $true }
+    return $false
+}
+
+function Compare-BytesConstantTime {
+    param([byte[]]$Left, [byte[]]$Right)
+    if ($null -eq $Left -or $null -eq $Right) { return $false }
+    if ($Left.Length -ne $Right.Length) { return $false }
+    $diff = 0
+    for ($i = 0; $i -lt $Left.Length; $i++) {
+        $diff = $diff -bor ($Left[$i] -bxor $Right[$i])
+    }
+    return ($diff -eq 0)
+}
+
+function New-HmacSignature {
+    param(
+        [byte[]]$MacKey,
+        [byte[]]$IV,
+        [byte[]]$CipherBytes
+    )
+    if ($null -eq $MacKey -or $MacKey.Length -ne 32) { return $null }
+    if ($null -eq $IV) { $IV = @() }
+    if ($null -eq $CipherBytes) { $CipherBytes = @() }
+    $payload = New-Object byte[] ($IV.Length + $CipherBytes.Length)
+    if ($IV.Length -gt 0) {
+        [Buffer]::BlockCopy($IV, 0, $payload, 0, $IV.Length)
+    }
+    if ($CipherBytes.Length -gt 0) {
+        [Buffer]::BlockCopy($CipherBytes, 0, $payload, $IV.Length, $CipherBytes.Length)
+    }
+    $hmac = [Security.Cryptography.HMACSHA256]::new($MacKey)
+    try {
+        $hash = $hmac.ComputeHash($payload)
+        return [Convert]::ToBase64String($hash)
+    } finally {
+        $hmac.Dispose()
+    }
+}
+
+function Test-HmacSignature {
+    param(
+        [byte[]]$MacKey,
+        [byte[]]$IV,
+        [byte[]]$CipherBytes,
+        [string]$Expected
+    )
+    if ([string]::IsNullOrWhiteSpace($Expected)) { return $false }
+    $expectedBytes = $null
+    try { $expectedBytes = [Convert]::FromBase64String($Expected) } catch { return $false }
+    $actualBase64 = New-HmacSignature -MacKey $MacKey -IV $IV -CipherBytes $CipherBytes
+    if ([string]::IsNullOrWhiteSpace($actualBase64)) { return $false }
+    $actualBytes = [Convert]::FromBase64String($actualBase64)
+    return (Compare-BytesConstantTime -Left $actualBytes -Right $expectedBytes)
 }
 
 function Protect-Bytes {
@@ -978,6 +1308,7 @@ function Save-Vault {
     param(
         [string]$VaultPath,
         [byte[]]$Key,
+        [byte[]]$MacKey,
         $Meta,
         $Data
     )
@@ -987,8 +1318,23 @@ function Save-Vault {
     $json = $Data | ConvertTo-Json -Depth 6
     $plainBytes = [Text.Encoding]::UTF8.GetBytes($json)
     $encrypted = Protect-Bytes -PlainBytes $plainBytes -Key $Key
-    $Meta.IV = $encrypted.IV
-    $Meta.Data = $encrypted.Data
+    Set-VaultMetaValue -Meta $Meta -Name "IV" -Value $encrypted.IV
+    Set-VaultMetaValue -Meta $Meta -Name "Data" -Value $encrypted.Data
+    $null = Ensure-VaultId -Meta $Meta
+    $macReady = ($null -ne $MacKey -and $MacKey.Length -eq 32)
+    if ($macReady) {
+        $ivBytes = [Convert]::FromBase64String($encrypted.IV)
+        $cipherBytes = [Convert]::FromBase64String($encrypted.Data)
+        Set-VaultMetaValue -Meta $Meta -Name "Mac" -Value (New-HmacSignature -MacKey $MacKey -IV $ivBytes -CipherBytes $cipherBytes)
+        if (Get-VaultVersion -Meta $Meta -lt 2) {
+            Set-VaultMetaValue -Meta $Meta -Name "Version" -Value 2
+        }
+    } else {
+        Remove-VaultMetaValue -Meta $Meta -Name "Mac"
+        if ($null -eq (Get-VaultMetaValue -Meta $Meta -Name "Version")) {
+            Set-VaultMetaValue -Meta $Meta -Name "Version" -Value 1
+        }
+    }
     $metaJson = $Meta | ConvertTo-Json -Depth 4
     $dir = Split-Path -Parent $VaultPath
     if (-not (Test-Path $dir)) {
@@ -1000,19 +1346,34 @@ function Save-Vault {
 function Get-DataFromMeta {
     param(
         $Meta,
-        [byte[]]$Key
+        [byte[]]$Key,
+        [byte[]]$MacKey
     )
     if ([string]::IsNullOrEmpty($Meta.Data)) {
+        if (Test-VaultMacRequired -Meta $Meta) {
+            throw "Vault integrity check failed."
+        }
         return [ordered]@{ Entries = @() }
+    }
+    if ([string]::IsNullOrWhiteSpace($Meta.IV)) {
+        throw "Vault file is invalid."
     }
     $iv = [Convert]::FromBase64String($Meta.IV)
     $cipher = [Convert]::FromBase64String($Meta.Data)
+    if (Test-VaultMacRequired -Meta $Meta) {
+        if ($null -eq $MacKey -or $MacKey.Length -ne 32) {
+            throw "Vault integrity check failed."
+        }
+        if (-not (Test-HmacSignature -MacKey $MacKey -IV $iv -CipherBytes $cipher -Expected $Meta.Mac)) {
+            throw "Vault integrity check failed."
+        }
+    }
     $plainBytes = Unprotect-Bytes -CipherBytes $cipher -Key $Key -IV $iv
     $json = [Text.Encoding]::UTF8.GetString($plainBytes)
     try {
-        $data = $json | ConvertFrom-Json -Depth 6
+        $data = ConvertFrom-JsonSafe -Json $json -Depth 6
     } catch {
-        $data = $json | ConvertFrom-Json
+        $data = ConvertFrom-JsonSafe -Json $json -Depth 6
     }
     if ($null -eq $data.Entries) {
         $data | Add-Member -NotePropertyName Entries -NotePropertyValue @() -Force
@@ -1029,6 +1390,20 @@ function Test-VaultMeta {
     $iterValue = 0
     if (-not [int]::TryParse($Meta.Iterations.ToString(), [ref]$iterValue)) { return $false }
     if ($iterValue -le 0) { return $false }
+    try { [Convert]::FromBase64String($Meta.Salt) | Out-Null } catch { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($Meta.IV)) {
+        try { [Convert]::FromBase64String($Meta.IV) | Out-Null } catch { return $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Meta.Data)) {
+        try { [Convert]::FromBase64String($Meta.Data) | Out-Null } catch { return $false }
+    }
+    $version = Get-VaultVersion -Meta $Meta
+    if ($version -ge 2) {
+        if ([string]::IsNullOrWhiteSpace($Meta.Mac)) { return $false }
+        try { [Convert]::FromBase64String($Meta.Mac) | Out-Null } catch { return $false }
+    } elseif (-not [string]::IsNullOrWhiteSpace($Meta.Mac)) {
+        try { [Convert]::FromBase64String($Meta.Mac) | Out-Null } catch { return $false }
+    }
     return $true
 }
 
@@ -1061,7 +1436,7 @@ function Write-Header {
     $hour = (Get-Date).Hour
     $salutation = if ($hour -lt 12) { "Good morning" } elseif ($hour -lt 18) { "Good afternoon" } else { "Good evening" }
     $greeting = "{0}, {1}." -f $salutation, $env:USERNAME
-    $hostLine = "Host: {0}" -f $env:COMPUTERNAME
+    $hostLine = "Host: {0}@{1}" -f $env:USERNAME, $env:COMPUTERNAME
     $titleLine = if ([string]::IsNullOrWhiteSpace($script:AppVersion)) {
         $script:AppName
     } else {
@@ -1356,6 +1731,7 @@ function Clear-VaultSession {
     $script:VaultMeta = $null
     $script:VaultData = $null
     $script:VaultKey = $null
+    $script:VaultMacKey = $null
 }
 
 function Get-ConsoleWidth {
@@ -2090,22 +2466,28 @@ function Open-Vault {
         if ([string]::IsNullOrEmpty($password)) { return $null }
         $salt = New-RandomBytes 16
         $iterations = 100000
-        $key = Get-KeyFromPassword -Password $password -Salt $salt -Iterations $iterations
+        $pair = Get-KeyPairFromPassword -Password $password -Salt $salt -Iterations $iterations
+        if ($null -eq $pair) {
+            Show-Message "Unable to derive vault key." ([ConsoleColor]::Red)
+            return $null
+        }
         $data = [ordered]@{ Entries = @() }
         $meta = [ordered]@{
-            Version = 1
+            Version = 2
+            VaultId = [guid]::NewGuid().ToString()
             AccountName = $AccountName
             Salt = [Convert]::ToBase64String($salt)
             Iterations = $iterations
             IV = ""
             Data = ""
         }
-        Save-Vault -VaultPath $VaultPath -Key $key -Meta $meta -Data $data
+        Save-Vault -VaultPath $VaultPath -Key $pair.EncKey -MacKey $pair.MacKey -Meta $meta -Data $data
         $password = $null
         return @{
             Meta = $meta
             Data = $data
-            Key  = $key
+            Key  = $pair.EncKey
+            MacKey = $pair.MacKey
         }
     }
 
@@ -2134,37 +2516,57 @@ function Open-Vault {
         Write-Header $title
         $password = Read-SecurePlain "Master password (Enter to abort)"
         if ([string]::IsNullOrEmpty($password)) { return $null }
-        $key = Get-KeyFromPassword -Password $password -Salt $salt -Iterations $iterations
+        $pair = Get-KeyPairFromPassword -Password $password -Salt $salt -Iterations $iterations
+        if ($null -eq $pair) {
+            Show-Message "Unable to derive vault key." ([ConsoleColor]::Red)
+            continue
+        }
         try {
-            $data = Get-DataFromMeta -Meta $meta -Key $key
+            $data = Get-DataFromMeta -Meta $meta -Key $pair.EncKey -MacKey $pair.MacKey
+            if (-not (Confirm-VaultTwoFactor -VaultPath $VaultPath -Meta $meta -Data $data -Key $pair.EncKey -MacKey $pair.MacKey)) {
+                return $null
+            }
             $password = $null
             return @{
                 Meta = $meta
                 Data = $data
-                Key  = $key
+                Key  = $pair.EncKey
+                MacKey = $pair.MacKey
             }
         } catch {
-            Show-Message "Invalid password." ([ConsoleColor]::Red)
+            Show-Message "Invalid password or vault corrupted." ([ConsoleColor]::Red)
             if ($recoveryAvailable) {
                 $choice = Show-ActionMenu -Title "Unlock failed" -Options @("Retry", "Recovery", "Abort") -Subtitle "A recovery password is configured for this vault."
                 if ($choice -eq "Recovery") {
                     $recoveryPassword = Read-SecurePlain "Recovery password (Enter to abort)"
                     if ([string]::IsNullOrEmpty($recoveryPassword)) { return $null }
-                    $masterKey = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
+                    $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
                     $recoveryPassword = $null
-                    if ($null -eq $masterKey) {
-                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                    if ($null -eq $recoveryMaterial) {
+                        Show-Message "Invalid recovery password or vault corrupted." ([ConsoleColor]::Red)
                         continue
                     }
                     try {
-                        $data = Get-DataFromMeta -Meta $meta -Key $masterKey
+                        $recoveryPair = Split-KeyMaterial -Material $recoveryMaterial
+                        if ($null -eq $recoveryPair) {
+                            $recoveryPair = @{ EncKey = $recoveryMaterial; MacKey = $null }
+                        }
+                        if ((Test-VaultMacRequired -Meta $meta) -and ($null -eq $recoveryPair.MacKey)) {
+                            Show-Message "Recovery password must be updated to unlock this vault." ([ConsoleColor]::Red)
+                            continue
+                        }
+                        $data = Get-DataFromMeta -Meta $meta -Key $recoveryPair.EncKey -MacKey $recoveryPair.MacKey
+                        if (-not (Confirm-VaultTwoFactor -VaultPath $VaultPath -Meta $meta -Data $data -Key $recoveryPair.EncKey -MacKey $recoveryPair.MacKey)) {
+                            return $null
+                        }
                         return @{
                             Meta = $meta
                             Data = $data
-                            Key  = $masterKey
+                            Key  = $recoveryPair.EncKey
+                            MacKey = $recoveryPair.MacKey
                         }
                     } catch {
-                        Show-Message "Invalid recovery password." ([ConsoleColor]::Red)
+                        Show-Message "Invalid recovery password or vault corrupted." ([ConsoleColor]::Red)
                     }
                 } elseif ($null -eq $choice -or $choice -eq "Abort") {
                     return $null
@@ -2182,10 +2584,15 @@ function Invoke-RecoveryOptions {
         [string]$AccountName,
         $Meta,
         $Data,
-        [byte[]]$Key
+        [byte[]]$Key,
+        [byte[]]$MacKey
     )
     if ($null -eq $Key -or $Key.Length -ne 32) {
         Show-Message "Recovery options unavailable for this vault session." ([ConsoleColor]::Red)
+        return $false
+    }
+    if ((Test-VaultMacRequired -Meta $Meta) -and ($null -eq $MacKey -or $MacKey.Length -ne 32)) {
+        Show-Message "Recovery options unavailable without a valid vault signature key." ([ConsoleColor]::Red)
         return $false
     }
     while ($true) {
@@ -2201,7 +2608,7 @@ function Invoke-RecoveryOptions {
         if ($choice -eq "Remove recovery") {
             if (-not (Confirm-Action "Remove recovery password for this vault?")) { return $false }
             Remove-RecoveryFields -Meta $Meta
-            Save-Vault -VaultPath $VaultPath -Key $Key -Meta $Meta -Data $Data
+            Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
             Show-Message "Recovery password removed." ([ConsoleColor]::Green)
             return $true
         }
@@ -2211,15 +2618,426 @@ function Invoke-RecoveryOptions {
         $salt = New-RandomBytes 16
         $iterations = 100000
         $recoveryKey = Get-KeyFromPassword -Password $recoveryPassword -Salt $salt -Iterations $iterations
-        $wrapped = Protect-Bytes -PlainBytes $Key -Key $recoveryKey
+        $material = Get-CombinedKeyMaterial -EncKey $Key -MacKey $MacKey
+        $wrapped = Protect-Bytes -PlainBytes $material -Key $recoveryKey
         $Meta.RecoverySalt = [Convert]::ToBase64String($salt)
         $Meta.RecoveryIterations = $iterations
         $Meta.RecoveryKeyIV = $wrapped.IV
         $Meta.RecoveryKeyData = $wrapped.Data
-        Save-Vault -VaultPath $VaultPath -Key $Key -Meta $Meta -Data $Data
+        Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
         $recoveryPassword = $null
         Show-Message "Recovery password saved." ([ConsoleColor]::Green)
         return $true
+    }
+}
+
+function ConvertTo-Base32 {
+    param([byte[]]$Bytes)
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return "" }
+    $alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+    $builder = New-Object System.Text.StringBuilder
+    $buffer = 0
+    $bitsLeft = 0
+    foreach ($b in $Bytes) {
+        $buffer = (($buffer -shl 8) -bor $b)
+        $bitsLeft += 8
+        while ($bitsLeft -ge 5) {
+            $bitsLeft -= 5
+            $index = ($buffer -shr $bitsLeft) -band 31
+            [void]$builder.Append($alphabet[$index])
+        }
+    }
+    if ($bitsLeft -gt 0) {
+        $index = (($buffer -shl (5 - $bitsLeft)) -band 31)
+        [void]$builder.Append($alphabet[$index])
+    }
+    return $builder.ToString()
+}
+
+function ConvertFrom-Base32 {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+    $clean = $Text.ToUpperInvariant() -replace "[^A-Z2-7]", ""
+    if ([string]::IsNullOrWhiteSpace($clean)) { return @() }
+    $map = @{
+        'A' = 0;  'B' = 1;  'C' = 2;  'D' = 3;  'E' = 4;  'F' = 5;  'G' = 6;  'H' = 7;
+        'I' = 8;  'J' = 9;  'K' = 10; 'L' = 11; 'M' = 12; 'N' = 13; 'O' = 14; 'P' = 15;
+        'Q' = 16; 'R' = 17; 'S' = 18; 'T' = 19; 'U' = 20; 'V' = 21; 'W' = 22; 'X' = 23;
+        'Y' = 24; 'Z' = 25; '2' = 26; '3' = 27; '4' = 28; '5' = 29; '6' = 30; '7' = 31
+    }
+    $buffer = 0
+    $bitsLeft = 0
+    $bytes = New-Object System.Collections.Generic.List[byte]
+    foreach ($ch in $clean.ToCharArray()) {
+        $key = [string]$ch
+        if (-not $map.ContainsKey($key)) { throw "Invalid Base32 character." }
+        $buffer = (($buffer -shl 5) -bor $map[$key])
+        $bitsLeft += 5
+        if ($bitsLeft -ge 8) {
+            $bitsLeft -= 8
+            $byte = ($buffer -shr $bitsLeft) -band 0xFF
+            $bytes.Add([byte]$byte) | Out-Null
+        }
+    }
+    return $bytes.ToArray()
+}
+
+function Format-TotpSecret {
+    param([string]$Secret)
+    if ([string]::IsNullOrWhiteSpace($Secret)) { return "" }
+    $clean = ($Secret -replace "\s+", "")
+    $groups = @()
+    for ($i = 0; $i -lt $clean.Length; $i += 4) {
+        $len = [Math]::Min(4, $clean.Length - $i)
+        $groups += $clean.Substring($i, $len)
+    }
+    return ($groups -join " ")
+}
+
+function New-TotpSecret {
+    $bytes = New-RandomBytes 20
+    return (ConvertTo-Base32 -Bytes $bytes)
+}
+
+function Get-UnixTimeSeconds {
+    return [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+}
+
+function Get-TotpCode {
+    param(
+        [string]$Secret,
+        [int]$Digits = 6,
+        [int]$StepSeconds = 30,
+        [long]$Timestamp
+    )
+    if ([string]::IsNullOrWhiteSpace($Secret)) { return $null }
+    try {
+        $secretBytes = ConvertFrom-Base32 -Text $Secret
+    } catch {
+        return $null
+    }
+    if ($null -eq $secretBytes -or $secretBytes.Length -eq 0) { return $null }
+    if ($null -eq $Timestamp -or $Timestamp -le 0) {
+        $Timestamp = Get-UnixTimeSeconds
+    }
+    $counter = [Math]::Floor($Timestamp / $StepSeconds)
+    $counterBytes = [BitConverter]::GetBytes([Int64]$counter)
+    if ([BitConverter]::IsLittleEndian) {
+        [Array]::Reverse($counterBytes)
+    }
+    $hmac = [Security.Cryptography.HMACSHA1]::new($secretBytes)
+    try {
+        $hash = $hmac.ComputeHash($counterBytes)
+    } finally {
+        $hmac.Dispose()
+    }
+    $offset = $hash[$hash.Length - 1] -band 0x0F
+    $binary = (($hash[$offset] -band 0x7F) -shl 24) -bor
+        (($hash[$offset + 1] -band 0xFF) -shl 16) -bor
+        (($hash[$offset + 2] -band 0xFF) -shl 8) -bor
+        ($hash[$offset + 3] -band 0xFF)
+    $mod = [Math]::Pow(10, $Digits)
+    $code = [int]($binary % $mod)
+    return $code.ToString(("D{0}" -f $Digits))
+}
+
+function Test-TotpCode {
+    param(
+        [string]$Secret,
+        [string]$Code,
+        [int]$Digits = 6,
+        [int]$StepSeconds = 30
+    )
+    if ([string]::IsNullOrWhiteSpace($Secret) -or [string]::IsNullOrWhiteSpace($Code)) { return $false }
+    $clean = ($Code -replace "\s+", "")
+    if ($clean -notmatch "^\d{6}$") { return $false }
+    $now = Get-UnixTimeSeconds
+    for ($offset = -1; $offset -le 1; $offset++) {
+        $timestamp = $now + ($offset * $StepSeconds)
+        $candidate = Get-TotpCode -Secret $Secret -Digits $Digits -StepSeconds $StepSeconds -Timestamp $timestamp
+        if ($candidate -eq $clean) { return $true }
+    }
+    return $false
+}
+
+function Get-VaultTotpSecret {
+    param($VaultData)
+    if ($null -eq $VaultData) { return $null }
+    if ($VaultData -is [System.Collections.IDictionary]) {
+        if ($VaultData.Contains("TotpSecret")) {
+            return $VaultData["TotpSecret"]
+        }
+        return $null
+    }
+    if ($VaultData.PSObject.Properties.Match("TotpSecret").Count -gt 0) {
+        return $VaultData.TotpSecret
+    }
+    return $null
+}
+
+function Set-VaultTotpSecret {
+    param($VaultData, [string]$Secret)
+    if ($null -eq $VaultData) { return }
+    if ($VaultData -is [System.Collections.IDictionary]) {
+        $VaultData["TotpSecret"] = $Secret
+        return
+    }
+    $VaultData | Add-Member -NotePropertyName TotpSecret -NotePropertyValue $Secret -Force
+}
+
+function Remove-VaultTotpSecret {
+    param($VaultData)
+    if ($null -eq $VaultData) { return }
+    if ($VaultData -is [System.Collections.IDictionary]) {
+        $VaultData.Remove("TotpSecret") | Out-Null
+        return
+    }
+    $VaultData.PSObject.Properties.Remove("TotpSecret")
+}
+
+function Copy-VaultData {
+    param($VaultData)
+    if ($null -eq $VaultData) { return $null }
+    $json = $VaultData | ConvertTo-Json -Depth 8
+    try {
+        return (ConvertFrom-JsonSafe -Json $json -Depth 8)
+    } catch {
+        return (ConvertFrom-JsonSafe -Json $json -Depth 8)
+    }
+}
+
+function Get-TrustTokenPath {
+    param([string]$VaultId)
+    if ([string]::IsNullOrWhiteSpace($VaultId)) { return $null }
+    $dir = Get-AppDir
+    if ([string]::IsNullOrWhiteSpace($dir)) { return $null }
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+    }
+    $safe = ($VaultId -replace "[^A-Za-z0-9\-]", "")
+    return (Join-Path $dir ("trust_{0}.json" -f $safe))
+}
+
+function Get-TrustTokenPayload {
+    param(
+        [string]$VaultId,
+        [Int64]$ExpiresTicks,
+        [string]$DeviceName
+    )
+    return ("{0}|{1}|{2}" -f $VaultId, $ExpiresTicks, $DeviceName)
+}
+
+function New-TrustSignature {
+    param(
+        [string]$Secret,
+        [string]$VaultId,
+        [Int64]$ExpiresTicks,
+        [string]$DeviceName
+    )
+    if ([string]::IsNullOrWhiteSpace($Secret)) { return $null }
+    try {
+        $secretBytes = ConvertFrom-Base32 -Text $Secret
+    } catch {
+        return $null
+    }
+    if ($null -eq $secretBytes -or $secretBytes.Length -eq 0) { return $null }
+    $payload = Get-TrustTokenPayload -VaultId $VaultId -ExpiresTicks $ExpiresTicks -DeviceName $DeviceName
+    $payloadBytes = [Text.Encoding]::UTF8.GetBytes($payload)
+    $hmac = [Security.Cryptography.HMACSHA256]::new($secretBytes)
+    try {
+        $hash = $hmac.ComputeHash($payloadBytes)
+        return [Convert]::ToBase64String($hash)
+    } finally {
+        $hmac.Dispose()
+    }
+}
+
+function Save-TrustToken {
+    param(
+        [string]$VaultId,
+        [string]$Secret,
+        [Int64]$ExpiresTicks
+    )
+    $path = Get-TrustTokenPath -VaultId $VaultId
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $device = $env:COMPUTERNAME
+    $signature = New-TrustSignature -Secret $Secret -VaultId $VaultId -ExpiresTicks $ExpiresTicks -DeviceName $device
+    if ([string]::IsNullOrWhiteSpace($signature)) { return $false }
+    $token = [ordered]@{
+        VaultId = $VaultId
+        Device = $device
+        ExpiresTicks = $ExpiresTicks
+        ExpiresUtc = ([DateTime]::new($ExpiresTicks, [DateTimeKind]::Utc)).ToString("o")
+        Signature = $signature
+    }
+    $json = $token | ConvertTo-Json -Depth 4
+    Set-Content -Path $path -Value $json -Encoding UTF8
+    return $true
+}
+
+function Remove-TrustToken {
+    param([string]$VaultId)
+    $path = Get-TrustTokenPath -VaultId $VaultId
+    if ([string]::IsNullOrWhiteSpace($path)) { return }
+    if (Test-Path $path) {
+        Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-TrustToken {
+    param(
+        [string]$VaultId,
+        [string]$Secret
+    )
+    if ([string]::IsNullOrWhiteSpace($VaultId) -or [string]::IsNullOrWhiteSpace($Secret)) { return $false }
+    $path = Get-TrustTokenPath -VaultId $VaultId
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path $path)) { return $false }
+    $token = $null
+    try {
+        $token = Get-Content -Path $path -Raw | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+    if ($null -eq $token) { return $false }
+    if ($token.VaultId -ne $VaultId) { return $false }
+    if ($token.Device -ne $env:COMPUTERNAME) { return $false }
+    $expiresTicks = 0
+    if ($null -ne $token.ExpiresTicks -and [Int64]::TryParse($token.ExpiresTicks.ToString(), [ref]$expiresTicks)) {
+    } elseif ($token.ExpiresUtc) {
+        $parsed = $null
+        if ([DateTime]::TryParse($token.ExpiresUtc.ToString(), [ref]$parsed)) {
+            $expiresTicks = $parsed.ToUniversalTime().Ticks
+        }
+    }
+    if ($expiresTicks -le 0) { return $false }
+    if ([DateTime]::UtcNow.Ticks -gt $expiresTicks) { return $false }
+    $signature = New-TrustSignature -Secret $Secret -VaultId $VaultId -ExpiresTicks $expiresTicks -DeviceName $token.Device
+    if ([string]::IsNullOrWhiteSpace($signature)) { return $false }
+    $signatureBytes = [Convert]::FromBase64String($signature)
+    $expectedBytes = $null
+    try { $expectedBytes = [Convert]::FromBase64String($token.Signature) } catch { return $false }
+    return (Compare-BytesConstantTime -Left $signatureBytes -Right $expectedBytes)
+}
+
+function Confirm-VaultTwoFactor {
+    param(
+        [string]$VaultPath,
+        $Meta,
+        $Data,
+        [byte[]]$Key,
+        [byte[]]$MacKey,
+        [switch]$IgnoreTrust,
+        [string]$Reason
+    )
+    $secret = Get-VaultTotpSecret -VaultData $Data
+    if ([string]::IsNullOrWhiteSpace($secret)) { return $true }
+    $needsSave = $false
+    $vaultId = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
+    if ([string]::IsNullOrWhiteSpace($vaultId)) {
+        $vaultId = Ensure-VaultId -Meta $Meta
+        $needsSave = $true
+    }
+    if (-not $IgnoreTrust) {
+        if (Test-TrustToken -VaultId $vaultId -Secret $secret) {
+            return $true
+        }
+    }
+    while ($true) {
+        Clear-Host
+        Write-Header "Two-factor authentication"
+        if ($Reason) {
+            Write-Host $Reason -ForegroundColor DarkGray
+        } else {
+            Write-Host "Enter the 6-digit code from your authenticator." -ForegroundColor DarkGray
+        }
+        Write-Host ""
+        $code = Read-Host "2FA code (Enter to abort)"
+        if ([string]::IsNullOrWhiteSpace($code)) { return $false }
+        if (Test-TotpCode -Secret $secret -Code $code) {
+            if (-not $IgnoreTrust) {
+                $expires = [DateTime]::UtcNow.AddHours(24)
+                Save-TrustToken -VaultId $vaultId -Secret $secret -ExpiresTicks $expires.Ticks | Out-Null
+            }
+            if ($needsSave -and $VaultPath -and $Key -and $MacKey -and $Meta -and $Data) {
+                Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+            }
+            return $true
+        }
+        $choice = Show-ActionMenu -Title "Invalid 2FA code" -Options @("Retry", "Abort")
+        if ($null -eq $choice -or $choice -eq "Abort") { return $false }
+    }
+}
+
+function Invoke-TwoFactorSettings {
+    param(
+        [string]$VaultPath,
+        $Meta,
+        $Data,
+        [byte[]]$Key,
+        [byte[]]$MacKey
+    )
+    if ($null -eq $Key -or $Key.Length -ne 32 -or $null -eq $MacKey -or $MacKey.Length -ne 32) {
+        Show-Message "2FA settings unavailable for this vault session." ([ConsoleColor]::Red)
+        return $false
+    }
+    while ($true) {
+        $secret = Get-VaultTotpSecret -VaultData $Data
+        $options = if ([string]::IsNullOrWhiteSpace($secret)) {
+            @("Enable 2FA", "Back")
+        } else {
+            @("Show secret", "Reconfigure 2FA", "Disable 2FA", "Back")
+        }
+        $subtitle = if ([string]::IsNullOrWhiteSpace($secret)) {
+            "Enable offline 2FA using a TOTP authenticator."
+        } else {
+            "2FA is enabled. Trusted devices stay unlocked for 24h."
+        }
+        $choice = Show-ActionMenu -Title "2FA Settings" -Options $options -Subtitle $subtitle
+        if ($null -eq $choice -or $choice -eq "Back") { return $false }
+        if ($choice -eq "Show secret") {
+            Clear-Host
+            Write-Header "2FA Secret Key"
+            $formatted = Format-TotpSecret -Secret $secret
+            Write-Host "Secret key (enter this into Google Authenticator / Authy / Ente):" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host $formatted -ForegroundColor Cyan
+            Write-Host ""
+            [void](Read-Host "Press Enter to return")
+            continue
+        }
+        if ($choice -eq "Disable 2FA") {
+            if (-not (Confirm-Action "Disable 2FA for this vault?")) { continue }
+            Remove-VaultTotpSecret -VaultData $Data
+            $vaultId = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
+            if ($vaultId) { Remove-TrustToken -VaultId $vaultId }
+            Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+            Show-Message "2FA disabled." ([ConsoleColor]::Green)
+            continue
+        }
+        if ($choice -eq "Enable 2FA" -or $choice -eq "Reconfigure 2FA") {
+            $newSecret = New-TotpSecret
+            Clear-Host
+            Write-Header "Enable 2FA"
+            Write-Host "Secret key (enter this into Google Authenticator / Authy / Ente):" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host (Format-TotpSecret -Secret $newSecret) -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "Enter the 6-digit code from your authenticator to confirm." -ForegroundColor DarkGray
+            Write-Host ""
+            $code = Read-Host "2FA code (Enter to abort)"
+            if ([string]::IsNullOrWhiteSpace($code)) { continue }
+            if (-not (Test-TotpCode -Secret $newSecret -Code $code)) {
+                Show-Message "Invalid 2FA code." ([ConsoleColor]::Red)
+                continue
+            }
+            Set-VaultTotpSecret -VaultData $Data -Secret $newSecret
+            $vaultId = Ensure-VaultId -Meta $Meta
+            Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+            $expires = [DateTime]::UtcNow.AddHours(24)
+            Save-TrustToken -VaultId $vaultId -Secret $newSecret -ExpiresTicks $expires.Ticks | Out-Null
+            Show-Message "2FA enabled and this device is trusted for 24 hours." ([ConsoleColor]::Green)
+            continue
+        }
     }
 }
 
@@ -2518,12 +3336,13 @@ function Show-VaultMenu {
                 }
             }
             "vault" {
-                $vaultChoice = Show-ActionMenu -Title "Vault" -Options @("Export", "Recovery", "Back") -Hint "Up/Down move, Enter select, Esc back."
+                $vaultChoice = Show-ActionMenu -Title "Vault" -Options @("Export", "2FA Settings", "Recovery", "Back") -Hint "Up/Down move, Enter select, Esc back."
                 if ($null -eq $vaultChoice -or $vaultChoice -eq "Back") {
                     $section = "main"
                     continue
                 }
                 if ($vaultChoice -eq "Export") { return @{ Action = "export"; Section = "vault" } }
+                if ($vaultChoice -eq "2FA Settings") { return @{ Action = "twofactor"; Section = "vault" } }
                 if ($vaultChoice -eq "Recovery") { return @{ Action = "recovery"; Section = "vault" } }
             }
             default {
@@ -2874,6 +3693,7 @@ function Invoke-VaultSession {
     $script:VaultMeta = $Vault.Meta
     $script:VaultData = $Vault.Data
     $script:VaultKey = $Vault.Key
+    $script:VaultMacKey = $Vault.MacKey
 
     if ($null -eq $script:VaultData.Entries) {
         $script:VaultData | Add-Member -NotePropertyName Entries -NotePropertyValue @() -Force
@@ -2901,7 +3721,7 @@ function Invoke-VaultSession {
                                 if ($action -eq "edit") {
                                     $updated = Read-Entry -Existing $entry
                                     if ($null -ne $updated) {
-                                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
                                         $entry = $updated
                                     }
                                 } else {
@@ -2915,7 +3735,7 @@ function Invoke-VaultSession {
                     $newEntry = Read-Entry
                     if ($null -ne $newEntry) {
                         $script:VaultData.Entries += $newEntry
-                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
                         $selectedIndex = $script:VaultData.Entries.Count - 1
                     }
                 }
@@ -2929,7 +3749,7 @@ function Invoke-VaultSession {
                                 $entry = $script:VaultData.Entries[$selectedIndex]
                                 $updated = Read-Entry -Existing $entry
                                 if ($null -ne $updated) {
-                                    Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                                    Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
                                 }
                             }
                         }
@@ -2945,7 +3765,7 @@ function Invoke-VaultSession {
                                 $entry = $script:VaultData.Entries[$selectedIndex]
                                 if (Confirm-Action "Delete '$($entry.Title)'?") {
                                     $script:VaultData.Entries = @($script:VaultData.Entries | Where-Object { $_.Id -ne $entry.Id })
-                                    Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                                    Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
                                     if ($selectedIndex -ge $script:VaultData.Entries.Count) {
                                         $selectedIndex = [Math]::Max(0, $script:VaultData.Entries.Count - 1)
                                     }
@@ -2958,15 +3778,18 @@ function Invoke-VaultSession {
                     $result = Import-CsvEntries -Entries $script:VaultData.Entries
                     if ($null -ne $result -and $result.Imported -gt 0) {
                         $script:VaultData.Entries = $result.Entries
-                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -Meta $script:VaultMeta -Data $script:VaultData
+                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
                         $selectedIndex = [Math]::Max(0, $script:VaultData.Entries.Count - 1)
                     }
                 }
                 "export" {
-                    Export-VaultData -AccountName $script:VaultMeta.AccountName -VaultData $script:VaultData | Out-Null
+                    Export-VaultData -AccountName $script:VaultMeta.AccountName -VaultData $script:VaultData -VaultMeta $script:VaultMeta -VaultPath $VaultPath -VaultKey $script:VaultKey -VaultMacKey $script:VaultMacKey | Out-Null
+                }
+                "twofactor" {
+                    Invoke-TwoFactorSettings -VaultPath $VaultPath -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey -MacKey $script:VaultMacKey | Out-Null
                 }
                 "recovery" {
-                    Invoke-RecoveryOptions -VaultPath $VaultPath -AccountName $script:VaultMeta.AccountName -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey | Out-Null
+                    Invoke-RecoveryOptions -VaultPath $VaultPath -AccountName $script:VaultMeta.AccountName -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey -MacKey $script:VaultMacKey | Out-Null
                 }
                 "logout" { break VaultSession }
                 "quit" {
