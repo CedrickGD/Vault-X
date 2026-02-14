@@ -2326,6 +2326,9 @@ function Show-ActionMenu {
             $ruleChar = if ($Title -eq "Main Menu") { '=' } else { '-' }
             Write-MenuRule -Char $ruleChar
             for ($i = 0; $i -lt $Options.Count; $i++) {
+                if ($i -gt 0 -and $Options[$i] -eq "Back") {
+                    Write-MenuRule -Char '-'
+                }
                 $isSelected = ($i -eq $Selected)
                 $line = Format-MenuLabel -Label $Options[$i] -IsSelected $isSelected
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
@@ -3318,39 +3321,48 @@ function Show-VaultMenu {
     while ($true) {
         switch ($section) {
             "entries" {
-                $entryOptions = @("View", "Add", "Import", "Back")
+                $entryOptions = @("View All Entries", "Back")
                 if ($HasEntries) {
-                    $entryOptions = @("View", "Add", "Edit", "Delete", "Import", "Back")
+                    $entryOptions = @("View All Entries", "Edit Entry", "Delete Entry", "Back")
                 }
-                $entryChoice = Show-ActionMenu -Title "Entries" -Options $entryOptions -Hint "Up/Down move, Enter select, Esc back."
+                $entryChoice = Show-ActionMenu -Title "Browse Entries" -Options $entryOptions -Hint "Up/Down move, Enter select, Esc back."
                 if ($null -eq $entryChoice -or $entryChoice -eq "Back") {
                     $section = "main"
                     continue
                 }
                 switch ($entryChoice) {
-                    "View" { return @{ Action = "view"; Section = "entries" } }
-                    "Add" { return @{ Action = "add"; Section = "entries" } }
-                    "Edit" { return @{ Action = "edit"; Section = "entries" } }
-                    "Delete" { return @{ Action = "delete"; Section = "entries" } }
-                    "Import" { return @{ Action = "import-csv"; Section = "entries" } }
+                    "View All Entries" { return @{ Action = "view"; Section = "entries" } }
+                    "Edit Entry" { return @{ Action = "edit"; Section = "entries" } }
+                    "Delete Entry" { return @{ Action = "delete"; Section = "entries" } }
                 }
             }
-            "vault" {
-                $vaultChoice = Show-ActionMenu -Title "Vault" -Options @("Export", "2FA Settings", "Recovery", "Back") -Hint "Up/Down move, Enter select, Esc back."
-                if ($null -eq $vaultChoice -or $vaultChoice -eq "Back") {
+            "security" {
+                $securityChoice = Show-ActionMenu -Title "Security Tools" -Options @("2FA Settings", "Recovery", "Back") -Hint "Up/Down move, Enter select, Esc back."
+                if ($null -eq $securityChoice -or $securityChoice -eq "Back") {
                     $section = "main"
                     continue
                 }
-                if ($vaultChoice -eq "Export") { return @{ Action = "export"; Section = "vault" } }
-                if ($vaultChoice -eq "2FA Settings") { return @{ Action = "twofactor"; Section = "vault" } }
-                if ($vaultChoice -eq "Recovery") { return @{ Action = "recovery"; Section = "vault" } }
+                if ($securityChoice -eq "2FA Settings") { return @{ Action = "twofactor"; Section = "security" } }
+                if ($securityChoice -eq "Recovery") { return @{ Action = "recovery"; Section = "security" } }
+            }
+            "transfer" {
+                $transferChoice = Show-ActionMenu -Title "Backup & Export" -Options @("Export Vault", "Import CSV Entries", "Back") -Hint "Up/Down move, Enter select, Esc back."
+                if ($null -eq $transferChoice -or $transferChoice -eq "Back") {
+                    $section = "main"
+                    continue
+                }
+                if ($transferChoice -eq "Export Vault") { return @{ Action = "export"; Section = "transfer" } }
+                if ($transferChoice -eq "Import CSV Entries") { return @{ Action = "import-csv"; Section = "transfer" } }
             }
             default {
-                $choice = Show-ActionMenu -Title $title -Options @("Entries", "Vault", "Back", "Quit") -ShowBanner -Hint "Up/Down move, Enter select, Esc back."
-                if ($null -eq $choice -or $choice -eq "Back") { return @{ Action = "logout"; Section = "main" } }
-                if ($choice -eq "Entries") { $section = "entries"; continue }
-                if ($choice -eq "Vault") { $section = "vault"; continue }
-                if ($choice -eq "Quit") { return @{ Action = "quit"; Section = "main" } }
+                $choice = Show-ActionMenu -Title $title -Options @("Search Entries", "Add Entry", "Browse Entries", "Security Tools", "Backup & Export", "Lock Vault", "Exit App") -ShowBanner -Hint "Up/Down move, Enter select, Esc back."
+                if ($null -eq $choice -or $choice -eq "Lock Vault") { return @{ Action = "logout"; Section = "main" } }
+                if ($choice -eq "Search Entries") { return @{ Action = "view"; Section = "entries" } }
+                if ($choice -eq "Add Entry") { return @{ Action = "add"; Section = "entries" } }
+                if ($choice -eq "Browse Entries") { $section = "entries"; continue }
+                if ($choice -eq "Security Tools") { $section = "security"; continue }
+                if ($choice -eq "Backup & Export") { $section = "transfer"; continue }
+                if ($choice -eq "Exit App") { return @{ Action = "quit"; Section = "main" } }
             }
         }
     }
@@ -3437,7 +3449,7 @@ function Show-AccountMenu {
             switch ($section) {
                 "settings" {
                     $settingsOptions = @("Customize", "Clear cache", "Back")
-                    $choice = Show-ActionMenu -Title "Settings" -Options $settingsOptions -Hint "Up/Down move, Enter select, Esc back."
+                    $choice = Show-ActionMenu -Title "Script Settings" -Options $settingsOptions -Hint "Up/Down move, Enter select, Esc back."
                     $isFirstRender = $true
                     if ($null -eq $choice -or $choice -eq "Back") {
                         $section = "main"
@@ -3446,18 +3458,28 @@ function Show-AccountMenu {
                     if ($choice -eq "Customize") { return @{ Action = "customize"; Section = "settings"; Selected = 0; Accounts = $accounts } }
                     if ($choice -eq "Clear cache") { return @{ Action = "wipe-cache"; Section = "settings"; Selected = 0; Accounts = $accounts } }
                 }
+                "manage" {
+                    $manageOptions = @("Remove Vault", "Back")
+                    $choice = Show-ActionMenu -Title "Manage Vaults" -Options $manageOptions -Hint "Up/Down move, Enter select, Esc back."
+                    $isFirstRender = $true
+                    if ($null -eq $choice -or $choice -eq "Back") {
+                        $section = "main"
+                        continue
+                    }
+                    if ($choice -eq "Remove Vault") { return @{ Action = "delete"; Section = "manage"; Selected = 0; Accounts = $accounts } }
+                }
                 default {
                     $actions = @()
                     if ($accounts.Count -gt 0) {
-                        $actions += @{ Label = "Open"; Action = "login" }
+                        $actions += @{ Label = "Open Existing"; Action = "login" }
                     }
-                    $actions += @{ Label = "New"; Action = "add" }
-                    $actions += @{ Label = "Import"; Action = "import" }
+                    $actions += @{ Label = "Create New"; Action = "add" }
+                    $actions += @{ Label = "Import Data"; Action = "import" }
                     if ($accounts.Count -gt 0) {
-                        $actions += @{ Label = "Remove"; Action = "delete" }
+                        $actions += @{ Label = "Manage Vaults"; Action = "manage" }
                     }
-                    $actions += @{ Label = "Settings"; Action = "settings" }
-                    $actions += @{ Label = "Quit"; Action = "quit" }
+                    $actions += @{ Label = "Script Settings"; Action = "settings" }
+                    $actions += @{ Label = "Exit App"; Action = "quit" }
 
                     if ($selectedAction -ge $actions.Count) {
                         $selectedAction = [Math]::Max(0, $actions.Count - 1)
@@ -3508,8 +3530,8 @@ function Show-AccountMenu {
                         }
                         "Enter" {
                             $action = $actions[$selectedAction].Action
-                            if ($action -eq "settings") {
-                                $section = "settings"
+                            if ($action -eq "settings" -or $action -eq "manage") {
+                                $section = $action
                                 $isFirstRender = $true
                                 continue
                             }
