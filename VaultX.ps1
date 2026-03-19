@@ -1,4 +1,4 @@
-<# 
+<#
 VaultX - simple local password manager (single-user, local encryption)
 #>
 
@@ -41,6 +41,7 @@ try {
         $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
     }
 } catch {
+    $script:DefaultHostForegroundColor = $null
 }
 
 function Convert-SecureStringToPlain {
@@ -137,6 +138,7 @@ function Write-Log {
         $stamp = (Get-Date).ToString("s")
         Add-Content -Path $path -Value ("[{0}] {1}" -f $stamp, $Message) -Encoding UTF8
     } catch {
+        return
     }
 }
 
@@ -157,6 +159,7 @@ function Wait-ForExit {
     try {
         [void](Read-Host $Prompt)
     } catch {
+        return
     }
 }
 
@@ -263,7 +266,7 @@ function Test-UpdateDownloadUrl {
         if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) { return $true }
     } catch {
         $status = $null
-        try { $status = $_.Exception.Response.StatusCode } catch { }
+        try { $status = $_.Exception.Response.StatusCode } catch { $status = $null }
         if ($status) {
             Write-Log ("Update download check failed: HTTP {0}" -f [int]$status)
         } else {
@@ -336,6 +339,7 @@ function Start-UpdatedScript {
             & $ScriptPath
         }
     } catch {
+        Write-Log ("Restart after update failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -347,6 +351,7 @@ function Invoke-UpdateCheck {
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     } catch {
+        Write-Log ("TLS 1.2 setup failed: {0}" -f $_.Exception.Message)
     }
     $content = $null
     try {
@@ -495,8 +500,8 @@ function New-VaultFolderWatcher {
 function Close-VaultFolderWatcher {
     param($Watcher)
     if ($null -eq $Watcher) { return }
-    try { $Watcher.EnableRaisingEvents = $false } catch { }
-    try { $Watcher.Dispose() } catch { }
+    try { $Watcher.EnableRaisingEvents = $false } catch { $null = $Watcher }
+    try { $Watcher.Dispose() } catch { $null = $Watcher }
 }
 
 function Sync-AccountsWithVaultFiles {
@@ -705,6 +710,7 @@ function Export-VaultData {
                             $candidateDir = Split-Path -Parent $destination
                         }
                     } catch {
+                        $candidateDir = $null
                     }
                 }
                 if ($null -eq $candidateDir) {
@@ -1054,6 +1060,7 @@ function Get-DesktopFolder {
         $path = [Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)
         if (-not [string]::IsNullOrWhiteSpace($path)) { return $path }
     } catch {
+        Write-Log ("Desktop folder lookup failed: {0}" -f $_.Exception.Message)
     }
     return $null
 }
@@ -1063,12 +1070,13 @@ function Get-DownloadsFolder {
         $path = [Environment]::GetFolderPath([Environment+SpecialFolder]::Downloads)
         if (-not [string]::IsNullOrWhiteSpace($path)) { return $path }
     } catch {
+        Write-Log ("Downloads folder lookup failed: {0}" -f $_.Exception.Message)
     }
-    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    if ([string]::IsNullOrWhiteSpace($profile)) { return $null }
-    $fallback = Join-Path $profile "Downloads"
+    $userProfilePath = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($userProfilePath)) { return $null }
+    $fallback = Join-Path $userProfilePath "Downloads"
     if (Test-PathSafe -Path $fallback) { return $fallback }
-    return $profile
+    return $userProfilePath
 }
 
 function Split-KeyMaterial {
@@ -1410,8 +1418,8 @@ function Write-Banner {
     $banner = @'
 ____   _________   ____ ___.____  ___________           ____  ___
 \   \ /   /  _  \ |    |   \    | \__    ___/           \   \/  /
- \   Y   /  /_\  \|    |   /    |   |    |      ______   \     / 
-  \     /    |    \    |  /|    |___|    |     /_____/   /     \ 
+ \   Y   /  /_\  \|    |   /    |   |    |      ______   \     /
+  \     /    |    \    |  /|    |___|    |     /_____/   /     \
    \___/\____|__  /______/ |_______ \____|              /___/\  \
                 \/                 \/                         \_/
 '@
@@ -1519,7 +1527,7 @@ function Render-MenuFrame {
                 $lineText = $lineText.Substring(0, $width)
             }
             $render = $lineText.PadRight($width)
-            if ($lineColor -ne $null) {
+            if ($null -ne $lineColor) {
                 [Console]::ForegroundColor = $lineColor
             }
             [Console]::Write($render)
@@ -1532,6 +1540,7 @@ function Render-MenuFrame {
             $targetRow = [Math]::Min([Math]::Max(0, $script:LastFrameLineCount), [Math]::Max(0, $height - 1))
             [Console]::SetCursorPosition(0, $targetRow)
         } catch {
+            Write-Log ("Frame cursor reset failed: {0}" -f $_.Exception.Message)
         }
     } catch {
         Clear-Host
@@ -1560,7 +1569,6 @@ function Add-MenuFrameLine {
 }
 
 function Read-MenuKey {
-    param([string]$Prompt)
     Render-MenuFrame
     $raw = $null
     try {
@@ -1616,6 +1624,7 @@ function Test-MenuKeyAvailable {
             return $Host.UI.RawUI.KeyAvailable
         }
     } catch {
+        return $false
     }
     try {
         return [Console]::KeyAvailable
@@ -1681,6 +1690,7 @@ function Set-CursorVisible {
     try {
         [Console]::CursorVisible = $Visible
     } catch {
+        Write-Log ("Cursor visibility update failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -1903,6 +1913,7 @@ function Set-FontColor {
             $Host.UI.RawUI.ForegroundColor = $Color
         }
     } catch {
+        Write-Log ("Host font color update failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -1992,7 +2003,7 @@ function Clear-UiColorSettings {
     $path = Get-SettingsPath
     if ($settings.PSObject.Properties.Count -eq 0) {
         if ($path -and (Test-Path $path)) {
-            try { Remove-Item -Path $path -Force } catch { }
+            try { Remove-Item -Path $path -Force } catch { Write-Log ("Settings cleanup failed: {0}" -f $_.Exception.Message) }
         }
         return
     }
@@ -2096,6 +2107,7 @@ function Reset-CustomizationDefaults {
             $Host.UI.RawUI.ForegroundColor = $script:DefaultHostForegroundColor
         }
     } catch {
+        Write-Log ("Reset customization defaults failed: {0}" -f $_.Exception.Message)
     }
     Clear-UiColorSettings
 }
@@ -2107,6 +2119,7 @@ function Get-UiColorSnapshot {
             $hostColor = $Host.UI.RawUI.ForegroundColor
         }
     } catch {
+        $hostColor = $null
     }
     return [ordered]@{
         Normal    = $script:MenuNormalColor
@@ -2133,6 +2146,7 @@ function Restore-UiColorSnapshot {
             $Host.UI.RawUI.ForegroundColor = $Snapshot.HostFg
         }
     } catch {
+        Write-Log ("Restore UI color snapshot failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -2176,8 +2190,8 @@ function Invoke-FontColorPrompt {
     Write-Host ("Available colors: " + $names) -ForegroundColor DarkGray
     Write-Host "Aliases: Purple, Pink, Violet, Teal, Aqua, Orange, Grey." -ForegroundColor DarkGray
     Write-Host ""
-    $input = Read-Host "Font color"
-    $color = Resolve-ConsoleColor -Value $input
+    $colorInput = Read-Host "Font color"
+    $color = Resolve-ConsoleColor -Value $colorInput
     if ($null -eq $color) {
         Show-Message "Invalid color value." ([ConsoleColor]::Red)
         return $false
@@ -2201,8 +2215,8 @@ function Invoke-UiColorPrompt {
     Write-Host ("Available colors: " + $names) -ForegroundColor DarkGray
     Write-Host "Aliases: Purple, Pink, Violet, Teal, Aqua, Orange, Grey." -ForegroundColor DarkGray
     Write-Host ""
-    $input = Read-Host "$Label color"
-    $color = Resolve-ConsoleColor -Value $input
+    $colorInput = Read-Host "$Label color"
+    $color = Resolve-ConsoleColor -Value $colorInput
     if ($null -eq $color) {
         Show-Message "Invalid color value." ([ConsoleColor]::Red)
         return $false
@@ -2311,9 +2325,8 @@ function Write-MenuItem {
     $consoleWidth = [Math]::Max(10, (Get-ConsoleWidth))
     $maxWidth = [Math]::Max(10, $consoleWidth - ($Indent + 4))
     $safeText = Format-MenuText -Text $Text -Max $maxWidth
-    $pointerColor = if ($IsActive) { $script:MenuHighlightColor } else { $script:MenuHighlightColor }
     if ($Align -eq "Center") {
-        $prefix = if ($IsSelected) { "$script:MenuPointerSymbol " } else { "  " }
+        $prefix = if ($IsSelected -and $IsActive) { "$script:MenuPointerSymbol " } else { "  " }
         $line = $prefix + $safeText
         $width = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
         $padding = [Math]::Max(0, [Math]::Floor(($width - $line.Length) / 2))
@@ -2323,7 +2336,7 @@ function Write-MenuItem {
         return
     }
     if ($BlockWidth -gt 0) {
-        $prefix = if ($IsSelected) { "$script:MenuPointerSymbol " } else { "  " }
+        $prefix = if ($IsSelected -and $IsActive) { "$script:MenuPointerSymbol " } else { "  " }
         $line = $prefix + $safeText
         $width = [Math]::Max($BlockWidth, $line.Length)
         $screenWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
@@ -2333,7 +2346,7 @@ function Write-MenuItem {
         Add-MenuFrameLine -Text $render -Color $Color
         return
     }
-    $prefix = if ($IsSelected) { "$script:MenuPointerSymbol " } else { "  " }
+    $prefix = if ($IsSelected -and $IsActive) { "$script:MenuPointerSymbol " } else { "  " }
     $line = $prefix + $safeText
     $renderWidth = [Math]::Max(10, $consoleWidth - $Indent)
     $render = $line.PadRight($renderWidth)
@@ -3483,7 +3496,7 @@ function Show-AccountMenu {
         [string]$StartSection = "main"
     )
     $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
-    $selectedAction = 0
+    $selectedAction = [Math]::Max(0, $Selected)
     $section = if ([string]::IsNullOrWhiteSpace($StartSection)) { "main" } else { $StartSection }
     $cursorState = Get-CursorVisible
     $watcher = New-VaultFolderWatcher
@@ -3899,6 +3912,7 @@ function Start-InteractiveShellOnQuit {
     try {
         & powershell.exe -NoExit
     } catch {
+        Write-Log ("Interactive shell relaunch failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -3955,6 +3969,7 @@ function Initialize-GuiFramework {
             }
         }
     } catch {
+        Write-Log ("GUI apartment-state check failed: {0}" -f $_.Exception.Message)
     }
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
@@ -4238,6 +4253,7 @@ function Show-GuiPromptDialog {
     $inputHeight = if ($Multiline) { 76 } else { 24 }
     $inputBox.SetBounds(16, 60, $Width - 32, $inputHeight)
     $inputBox.Text = $DefaultValue
+    $inputBox.Tag = if ($AllowEmpty) { "allow-empty" } else { "require-value" }
     if ($IsPassword) { $inputBox.UseSystemPasswordChar = $true }
     if ($Multiline) {
         $inputBox.Multiline = $true
@@ -4569,20 +4585,20 @@ function Show-GuiEntryEditor {
         $form.Controls.Add($label)
 
         $height = if ($config.Multiline) { 72 } else { 24 }
-        $input = New-Object System.Windows.Forms.TextBox
-        $input.SetBounds(16, $y + 20, 628, $height)
+        $inputBox = New-Object System.Windows.Forms.TextBox
+        $inputBox.SetBounds(16, $y + 20, 628, $height)
         if ($config.Multiline) {
-            $input.Multiline = $true
-            $input.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+            $inputBox.Multiline = $true
+            $inputBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
         }
         if ($config.Password) {
-            $input.UseSystemPasswordChar = $true
+            $inputBox.UseSystemPasswordChar = $true
         }
         if ($null -ne $Existing) {
-            $input.Text = [string]($Existing.$($config.Name))
+            $inputBox.Text = [string]($Existing.$($config.Name))
         }
-        $inputs[$config.Name] = $input
-        $form.Controls.Add($input)
+        $inputs[$config.Name] = $inputBox
+        $form.Controls.Add($inputBox)
 
         if ($config.Password) {
             $showCheck = New-Object System.Windows.Forms.CheckBox
@@ -5221,6 +5237,7 @@ function Show-VaultGui {
         [object]$Owner
     )
     if (-not (Initialize-GuiFramework)) { return }
+    if ([string]::IsNullOrWhiteSpace($VaultPath)) { return }
 
     $vaultMeta = $Vault.Meta
     $vaultData = $Vault.Data
