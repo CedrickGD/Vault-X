@@ -5,6 +5,7 @@ VaultX - simple local password manager (single-user, local encryption)
 [CmdletBinding()]
 param(
     [switch]$Close,
+    [switch]$Gui,
     [switch]$Help,
     [switch]$OpenData
 )
@@ -31,6 +32,7 @@ $script:DefaultMenuHighlightColor = $script:MenuHighlightColor
 $script:DefaultMenuSeparatorColor = $script:MenuSeparatorColor
 $script:DefaultMenuDisabledColor = $script:MenuDisabledColor
 $script:DefaultHostForegroundColor = $null
+$script:GuiTheme = "dark"
 $script:FrameBufferActive = $false
 $script:FrameBufferLines = @()
 $script:LastFrameLineCount = 0
@@ -633,10 +635,7 @@ function Remove-Account {
     if ($Accounts.Count -eq 0) { return $Accounts }
     $account = $Accounts[$Selected]
     $vaultPath = Get-VaultPath -FileName $account.File
-    if (-not (Confirm-AccountPassword -VaultPath $vaultPath -AccountName $account.Name)) {
-        return $Accounts
-    }
-    if (-not (Confirm-Action "Delete vault '$($account.Name)' and its data?")) {
+    if (-not (Confirm-Action "Delete vault '$($account.Name)' and its data? This cannot be undone.")) {
         return $Accounts
     }
     if (Test-Path $vaultPath) {
@@ -1482,6 +1481,7 @@ function Show-Usage {
     Write-Host ""
     Write-Host "Usage:" -ForegroundColor Gray
     Write-Host "  VaultX.ps1             # Launch the app" -ForegroundColor Gray
+    Write-Host "  VaultX.ps1 -Gui        # Launch the local GUI" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Close       # Close the app session" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -OpenData    # Open data folder" -ForegroundColor Gray
     Write-Host "  VaultX.ps1 -Help        # Show this help" -ForegroundColor Gray
@@ -2036,6 +2036,52 @@ function Initialize-Settings {
         $color = Resolve-ConsoleColor -Value $bannerValue
         if ($null -ne $color) { Set-BannerColor -Color $color }
     }
+    $guiThemeValue = $settings.GuiTheme
+    if (-not [string]::IsNullOrWhiteSpace($guiThemeValue)) {
+        $normalizedTheme = $guiThemeValue.Trim().ToLowerInvariant()
+        if ($normalizedTheme -in @("dark", "light")) {
+            $script:GuiTheme = $normalizedTheme
+        }
+    }
+}
+
+function Get-GuiThemeMode {
+    if ([string]::IsNullOrWhiteSpace($script:GuiTheme)) {
+        $script:GuiTheme = "dark"
+    }
+    $normalized = $script:GuiTheme.Trim().ToLowerInvariant()
+    if ($normalized -notin @("dark", "light")) {
+        $normalized = "dark"
+    }
+    $script:GuiTheme = $normalized
+    return $normalized
+}
+
+function Save-GuiThemeSetting {
+    param([string]$Theme)
+    $normalized = if ([string]::IsNullOrWhiteSpace($Theme)) { "dark" } else { $Theme.Trim().ToLowerInvariant() }
+    if ($normalized -notin @("dark", "light")) { $normalized = "dark" }
+    $settings = Read-Settings
+    if ($null -eq $settings) { $settings = @{} }
+    $settings | Add-Member -NotePropertyName GuiTheme -NotePropertyValue $normalized -Force
+    Write-Settings -Settings $settings
+}
+
+function Set-GuiThemeMode {
+    param([string]$Theme)
+    $normalized = if ([string]::IsNullOrWhiteSpace($Theme)) { "dark" } else { $Theme.Trim().ToLowerInvariant() }
+    if ($normalized -notin @("dark", "light")) { $normalized = "dark" }
+    $script:GuiTheme = $normalized
+    Save-GuiThemeSetting -Theme $normalized
+    return $script:GuiTheme
+}
+
+function Toggle-GuiThemeMode {
+    $current = Get-GuiThemeMode
+    if ($current -eq "dark") {
+        return (Set-GuiThemeMode -Theme "light")
+    }
+    return (Set-GuiThemeMode -Theme "dark")
 }
 
 function Reset-CustomizationDefaults {
@@ -3478,6 +3524,7 @@ function Show-AccountMenu {
                     if ($accounts.Count -gt 0) {
                         $actions += @{ Label = "Manage Vaults"; Action = "manage" }
                     }
+                    $actions += @{ Label = "Switch to GUI"; Action = "gui" }
                     $actions += @{ Label = "Script Settings"; Action = "settings" }
                     $actions += @{ Label = "Exit App"; Action = "quit" }
 
@@ -3870,6 +3917,1901 @@ function Register-VaultXSession {
     }
 }
 
+function Initialize-ConsoleWindowInterop {
+    if ($script:ConsoleInteropInitialized) { return $true }
+    try {
+        if (-not ("VaultXConsoleInterop" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class VaultXConsoleInterop
+{
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@ -ErrorAction Stop
+        }
+        $script:ConsoleInteropInitialized = $true
+        return $true
+    } catch {
+        Write-Log ("Console interop init failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
+function Initialize-GuiFramework {
+    if ($script:GuiInitialized) { return $true }
+    try {
+        if ($Host -and $Host.Runspace -and $Host.Runspace.ApartmentState) {
+            $state = $Host.Runspace.ApartmentState.ToString()
+            if ($state -ne "STA") {
+                Write-Log ("GUI mode requires STA, current state: {0}" -f $state)
+                return $false
+            }
+        }
+    } catch {
+    }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        [System.Windows.Forms.Application]::EnableVisualStyles()
+        Initialize-ConsoleWindowInterop | Out-Null
+        $script:GuiInitialized = $true
+        return $true
+    } catch {
+        Write-Log ("GUI init failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
+function Set-ConsoleWindowVisible {
+    param([bool]$Visible)
+    if (-not (Initialize-ConsoleWindowInterop)) { return $false }
+    $interop = "VaultXConsoleInterop" -as [type]
+    if ($null -eq $interop) { return $false }
+    $handle = $interop::GetConsoleWindow()
+    if ($handle -eq [IntPtr]::Zero) { return $false }
+    $mode = if ($Visible) { 5 } else { 0 }
+    return $interop::ShowWindow($handle, $mode)
+}
+
+function Get-GuiThemePalette {
+    param([string]$Theme)
+    $mode = if ([string]::IsNullOrWhiteSpace($Theme)) { Get-GuiThemeMode } else { $Theme.Trim().ToLowerInvariant() }
+    if ($mode -eq "light") {
+        return @{
+            Mode = "light"
+            BackColor = [System.Drawing.Color]::FromArgb(248, 248, 248)
+            PanelColor = [System.Drawing.Color]::White
+            TextColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+            MutedTextColor = [System.Drawing.Color]::FromArgb(85, 85, 85)
+            AccentColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+            InputBackColor = [System.Drawing.Color]::White
+            InputTextColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+            ButtonBackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
+            ButtonTextColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+            GridColor = [System.Drawing.Color]::FromArgb(224, 224, 224)
+            SelectionBackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+            SelectionTextColor = [System.Drawing.Color]::White
+            BorderColor = [System.Drawing.Color]::FromArgb(210, 210, 210)
+        }
+    }
+    return @{
+        Mode = "dark"
+        BackColor = [System.Drawing.Color]::FromArgb(24, 24, 28)
+        PanelColor = [System.Drawing.Color]::FromArgb(32, 32, 38)
+        TextColor = [System.Drawing.Color]::FromArgb(236, 236, 240)
+        MutedTextColor = [System.Drawing.Color]::FromArgb(170, 170, 180)
+        AccentColor = [System.Drawing.Color]::FromArgb(88, 166, 255)
+        InputBackColor = [System.Drawing.Color]::FromArgb(18, 18, 22)
+        InputTextColor = [System.Drawing.Color]::FromArgb(242, 242, 245)
+        ButtonBackColor = [System.Drawing.Color]::FromArgb(44, 44, 52)
+        ButtonTextColor = [System.Drawing.Color]::FromArgb(242, 242, 245)
+        GridColor = [System.Drawing.Color]::FromArgb(58, 58, 68)
+        SelectionBackColor = [System.Drawing.Color]::FromArgb(58, 110, 165)
+        SelectionTextColor = [System.Drawing.Color]::White
+        BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 82)
+    }
+}
+
+function Apply-GuiTheme {
+    param(
+        [object]$Control,
+        [string]$Theme
+    )
+    if ($null -eq $Control) { return }
+    $palette = Get-GuiThemePalette -Theme $Theme
+
+    if ($Control -is [System.Windows.Forms.Form]) {
+        $Control.BackColor = $palette.BackColor
+        $Control.ForeColor = $palette.TextColor
+    } elseif ($Control -is [System.Windows.Forms.GroupBox]) {
+        $Control.BackColor = $palette.BackColor
+        $Control.ForeColor = $palette.TextColor
+    } elseif ($Control -is [System.Windows.Forms.Panel]) {
+        $Control.BackColor = $palette.PanelColor
+        $Control.ForeColor = $palette.TextColor
+    } elseif ($Control -is [System.Windows.Forms.Label]) {
+        $Control.BackColor = [System.Drawing.Color]::Transparent
+        $Control.ForeColor = $palette.TextColor
+    } elseif ($Control -is [System.Windows.Forms.CheckBox]) {
+        $Control.BackColor = $palette.BackColor
+        $Control.ForeColor = $palette.TextColor
+    } elseif ($Control -is [System.Windows.Forms.Button]) {
+        $Control.BackColor = $palette.ButtonBackColor
+        $Control.ForeColor = $palette.ButtonTextColor
+        $Control.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+        $Control.FlatAppearance.BorderColor = $palette.BorderColor
+        $Control.FlatAppearance.MouseOverBackColor = $palette.AccentColor
+        $Control.FlatAppearance.MouseDownBackColor = $palette.AccentColor
+    } elseif ($Control -is [System.Windows.Forms.TextBox]) {
+        $Control.BackColor = $palette.InputBackColor
+        $Control.ForeColor = $palette.InputTextColor
+        if ($Control.ReadOnly) {
+            $Control.BackColor = $palette.PanelColor
+        }
+        $Control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    } elseif ($Control -is [System.Windows.Forms.ListBox]) {
+        $Control.BackColor = $palette.InputBackColor
+        $Control.ForeColor = $palette.InputTextColor
+        $Control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    } elseif ($Control -is [System.Windows.Forms.DataGridView]) {
+        $Control.BackgroundColor = $palette.InputBackColor
+        $Control.GridColor = $palette.GridColor
+        $Control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $Control.EnableHeadersVisualStyles = $false
+        $Control.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
+        $Control.RowHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
+        $Control.DefaultCellStyle.BackColor = $palette.InputBackColor
+        $Control.DefaultCellStyle.ForeColor = $palette.InputTextColor
+        $Control.DefaultCellStyle.SelectionBackColor = $palette.SelectionBackColor
+        $Control.DefaultCellStyle.SelectionForeColor = $palette.SelectionTextColor
+        $Control.AlternatingRowsDefaultCellStyle.BackColor = if ($palette.Mode -eq "dark") { [System.Drawing.Color]::FromArgb(22, 22, 26) } else { [System.Drawing.Color]::FromArgb(245, 245, 245) }
+        $Control.AlternatingRowsDefaultCellStyle.ForeColor = $palette.InputTextColor
+        $Control.AlternatingRowsDefaultCellStyle.SelectionBackColor = $palette.SelectionBackColor
+        $Control.AlternatingRowsDefaultCellStyle.SelectionForeColor = $palette.SelectionTextColor
+        $Control.ColumnHeadersDefaultCellStyle.BackColor = $palette.PanelColor
+        $Control.ColumnHeadersDefaultCellStyle.ForeColor = $palette.TextColor
+        $Control.ColumnHeadersDefaultCellStyle.SelectionBackColor = $palette.PanelColor
+        $Control.ColumnHeadersDefaultCellStyle.SelectionForeColor = $palette.TextColor
+    }
+
+    if ($Control.PSObject.Properties.Name -contains "Controls") {
+        foreach ($child in $Control.Controls) {
+            Apply-GuiTheme -Control $child -Theme $palette.Mode
+        }
+    }
+}
+
+function Show-GuiMessage {
+    param(
+        [string]$Text,
+        [string]$Title = $script:AppName,
+        [string]$Kind = "Info",
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) {
+        Show-Message $Text ([ConsoleColor]::Yellow)
+        return
+    }
+    $icon = [System.Windows.Forms.MessageBoxIcon]::Information
+    switch ($Kind.ToLowerInvariant()) {
+        "error" { $icon = [System.Windows.Forms.MessageBoxIcon]::Error }
+        "warning" { $icon = [System.Windows.Forms.MessageBoxIcon]::Warning }
+        "question" { $icon = [System.Windows.Forms.MessageBoxIcon]::Question }
+    }
+    try {
+        if ($null -ne $Owner) {
+            [void][System.Windows.Forms.MessageBox]::Show($Owner, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $icon)
+        } else {
+            [void][System.Windows.Forms.MessageBox]::Show($Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $icon)
+        }
+    } catch {
+        [void][System.Windows.Forms.MessageBox]::Show($Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $icon)
+    }
+}
+
+function Show-GuiConfirm {
+    param(
+        [string]$Text,
+        [string]$Title = $script:AppName,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return $false }
+    try {
+        if ($null -ne $Owner) {
+            $result = [System.Windows.Forms.MessageBox]::Show($Owner, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        } else {
+            $result = [System.Windows.Forms.MessageBox]::Show($Text, $Title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        }
+    } catch {
+        $result = [System.Windows.Forms.MessageBox]::Show($Text, $Title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    }
+    return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
+function Show-GuiChoiceDialog {
+    param(
+        [string]$Title,
+        [string]$Message,
+        [string[]]$Options,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return $null }
+    if ($null -eq $Options -or $Options.Count -eq 0) { return $null }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = if ([string]::IsNullOrWhiteSpace($Title)) { $script:AppName } else { $Title }
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $false
+    $form.ClientSize = New-Object System.Drawing.Size(540, 180)
+
+    $messageLabel = New-Object System.Windows.Forms.Label
+    $messageLabel.AutoSize = $false
+    $messageLabel.Text = $Message
+    $messageLabel.SetBounds(16, 16, 508, 78)
+    $messageLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $form.Controls.Add($messageLabel)
+
+    $buttonWidth = if ($Options.Count -ge 4) { 120 } else { 110 }
+    $buttonGap = 10
+    $totalWidth = ($Options.Count * $buttonWidth) + ([Math]::Max(0, $Options.Count - 1) * $buttonGap)
+    $startX = [Math]::Max(16, [int](($form.ClientSize.Width - $totalWidth) / 2))
+    $y = 112
+    $buttons = @()
+    $cancelButton = $null
+
+    foreach ($option in $Options) {
+        $button = New-Object System.Windows.Forms.Button
+        $button.Text = $option
+        $button.Tag = $option
+        $button.SetBounds($startX, $y, $buttonWidth, 32)
+        $button.Add_Click({
+            $form.Tag = [string]$this.Tag
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $form.Close()
+        })
+        $buttons += $button
+        $form.Controls.Add($button)
+        if ($option -match "^(Cancel|Abort|Back|Close|No)$") {
+            $cancelButton = $button
+        }
+        $startX += ($buttonWidth + $buttonGap)
+    }
+
+    if ($buttons.Count -gt 0) {
+        $form.AcceptButton = $buttons[0]
+    }
+    if ($null -ne $cancelButton) {
+        $form.CancelButton = $cancelButton
+    }
+    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+
+    $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        return [string]$form.Tag
+    }
+    return $null
+}
+
+function Show-GuiPromptDialog {
+    param(
+        [string]$Title,
+        [string]$Prompt,
+        [string]$DefaultValue = "",
+        [switch]$IsPassword,
+        [switch]$Multiline,
+        [switch]$AllowEmpty,
+        [string]$OkText = "OK",
+        [string]$CancelText = "Cancel",
+        [int]$Width = 440,
+        [int]$Height = 190,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return $null }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = if ([string]::IsNullOrWhiteSpace($Title)) { $script:AppName } else { $Title }
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $false
+    $form.ClientSize = New-Object System.Drawing.Size($Width, $Height)
+
+    $promptLabel = New-Object System.Windows.Forms.Label
+    $promptLabel.AutoSize = $false
+    $promptLabel.Text = $Prompt
+    $promptLabel.SetBounds(16, 16, $Width - 32, 36)
+    $promptLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $form.Controls.Add($promptLabel)
+
+    $inputBox = New-Object System.Windows.Forms.TextBox
+    $inputHeight = if ($Multiline) { 76 } else { 24 }
+    $inputBox.SetBounds(16, 60, $Width - 32, $inputHeight)
+    $inputBox.Text = $DefaultValue
+    if ($IsPassword) { $inputBox.UseSystemPasswordChar = $true }
+    if ($Multiline) {
+        $inputBox.Multiline = $true
+        $inputBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    }
+    $form.Controls.Add($inputBox)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = $OkText
+    $okButton.SetBounds($Width - 196, $Height - 52, 84, 30)
+    $okButton.Add_Click({
+        if (-not $AllowEmpty -and [string]::IsNullOrWhiteSpace($inputBox.Text)) {
+            Show-GuiMessage -Text "A value is required." -Title $form.Text -Kind Warning -Owner $form
+            return
+        }
+        $form.Tag = $inputBox.Text
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = $CancelText
+    $cancelButton.SetBounds($Width - 104, $Height - 52, 84, 30)
+    $cancelButton.Add_Click({
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $form.Close()
+    })
+    $form.Controls.Add($cancelButton)
+
+    $form.AcceptButton = $okButton
+    $form.CancelButton = $cancelButton
+    $form.Add_Shown({ $inputBox.Focus(); $inputBox.SelectAll() })
+    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+
+    $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        return [string]$form.Tag
+    }
+    return $null
+}
+
+function Read-GuiConfirmedSecret {
+    param(
+        [string]$Title,
+        [string]$Prompt,
+        [string]$ConfirmPrompt,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return $null }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = if ([string]::IsNullOrWhiteSpace($Title)) { $script:AppName } else { $Title }
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $false
+    $form.ClientSize = New-Object System.Drawing.Size(470, 210)
+
+    $prompt1 = New-Object System.Windows.Forms.Label
+    $prompt1.Text = $Prompt
+    $prompt1.SetBounds(16, 18, 438, 18)
+    $form.Controls.Add($prompt1)
+
+    $box1 = New-Object System.Windows.Forms.TextBox
+    $box1.UseSystemPasswordChar = $true
+    $box1.SetBounds(16, 40, 438, 24)
+    $form.Controls.Add($box1)
+
+    $prompt2 = New-Object System.Windows.Forms.Label
+    $prompt2.Text = $ConfirmPrompt
+    $prompt2.SetBounds(16, 80, 438, 18)
+    $form.Controls.Add($prompt2)
+
+    $box2 = New-Object System.Windows.Forms.TextBox
+    $box2.UseSystemPasswordChar = $true
+    $box2.SetBounds(16, 102, 438, 24)
+    $form.Controls.Add($box2)
+
+    $showCheck = New-Object System.Windows.Forms.CheckBox
+    $showCheck.Text = "Show password"
+    $showCheck.SetBounds(16, 136, 120, 22)
+    $showCheck.Add_CheckedChanged({
+        $visible = -not $showCheck.Checked
+        $box1.UseSystemPasswordChar = $visible
+        $box2.UseSystemPasswordChar = $visible
+    })
+    $form.Controls.Add($showCheck)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "Save"
+    $okButton.SetBounds(286, 166, 80, 30)
+    $okButton.Add_Click({
+        if ([string]::IsNullOrWhiteSpace($box1.Text) -or [string]::IsNullOrWhiteSpace($box2.Text)) {
+            Show-GuiMessage -Text "Both password fields are required." -Title $form.Text -Kind Warning -Owner $form
+            return
+        }
+        if ($box1.Text -ne $box2.Text) {
+            Show-GuiMessage -Text "Passwords do not match." -Title $form.Text -Kind Error -Owner $form
+            return
+        }
+        $form.Tag = $box1.Text
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.SetBounds(374, 166, 80, 30)
+    $cancelButton.Add_Click({
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $form.Close()
+    })
+    $form.Controls.Add($cancelButton)
+
+    $form.AcceptButton = $okButton
+    $form.CancelButton = $cancelButton
+    $form.Add_Shown({ $box1.Focus() })
+    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+
+    $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        return [string]$form.Tag
+    }
+    return $null
+}
+
+function Show-GuiReadOnlyTextDialog {
+    param(
+        [string]$Title,
+        [string]$Prompt,
+        [string]$Value,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = if ([string]::IsNullOrWhiteSpace($Title)) { $script:AppName } else { $Title }
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $false
+    $form.ClientSize = New-Object System.Drawing.Size(520, 220)
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.AutoSize = $false
+    $label.Text = $Prompt
+    $label.SetBounds(16, 16, 488, 34)
+    $form.Controls.Add($label)
+
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.ReadOnly = $true
+    $textBox.Multiline = $true
+    $textBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $textBox.Text = $Value
+    $textBox.SetBounds(16, 54, 488, 110)
+    $form.Controls.Add($textBox)
+
+    $copyButton = New-Object System.Windows.Forms.Button
+    $copyButton.Text = "Copy"
+    $copyButton.SetBounds(332, 178, 80, 30)
+    $copyButton.Add_Click({
+        if (-not [string]::IsNullOrWhiteSpace($textBox.Text)) {
+            Set-ClipboardSafe -Value $textBox.Text | Out-Null
+        }
+    })
+    $form.Controls.Add($copyButton)
+
+    $closeButton = New-Object System.Windows.Forms.Button
+    $closeButton.Text = "Close"
+    $closeButton.SetBounds(424, 178, 80, 30)
+    $closeButton.Add_Click({
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $form.Close()
+    })
+    $form.Controls.Add($closeButton)
+
+    $form.CancelButton = $closeButton
+    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+    if ($null -ne $Owner) {
+        [void]$form.ShowDialog($Owner)
+    } else {
+        [void]$form.ShowDialog()
+    }
+}
+
+function Show-GuiTotpSetupDialog {
+    param(
+        [string]$Title,
+        [string]$Prompt,
+        [string]$Secret,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return $null }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = if ([string]::IsNullOrWhiteSpace($Title)) { $script:AppName } else { $Title }
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $false
+    $form.ClientSize = New-Object System.Drawing.Size(540, 250)
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.AutoSize = $false
+    $label.Text = $Prompt
+    $label.SetBounds(16, 16, 508, 38)
+    $form.Controls.Add($label)
+
+    $secretLabel = New-Object System.Windows.Forms.Label
+    $secretLabel.Text = "Secret key"
+    $secretLabel.SetBounds(16, 66, 120, 18)
+    $form.Controls.Add($secretLabel)
+
+    $secretBox = New-Object System.Windows.Forms.TextBox
+    $secretBox.ReadOnly = $true
+    $secretBox.Text = $Secret
+    $secretBox.SetBounds(16, 88, 408, 24)
+    $form.Controls.Add($secretBox)
+
+    $copyButton = New-Object System.Windows.Forms.Button
+    $copyButton.Text = "Copy"
+    $copyButton.SetBounds(434, 86, 90, 28)
+    $copyButton.Add_Click({
+        if (-not [string]::IsNullOrWhiteSpace($secretBox.Text)) {
+            Set-ClipboardSafe -Value ($secretBox.Text -replace "\s+", "") | Out-Null
+        }
+    })
+    $form.Controls.Add($copyButton)
+
+    $codeLabel = New-Object System.Windows.Forms.Label
+    $codeLabel.Text = "Authenticator code"
+    $codeLabel.SetBounds(16, 132, 160, 18)
+    $form.Controls.Add($codeLabel)
+
+    $codeBox = New-Object System.Windows.Forms.TextBox
+    $codeBox.SetBounds(16, 154, 508, 24)
+    $form.Controls.Add($codeBox)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "Confirm"
+    $okButton.SetBounds(352, 198, 80, 30)
+    $okButton.Add_Click({
+        if ([string]::IsNullOrWhiteSpace($codeBox.Text)) {
+            Show-GuiMessage -Text "Enter the 6-digit code from your authenticator." -Title $form.Text -Kind Warning -Owner $form
+            return
+        }
+        $form.Tag = $codeBox.Text
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.SetBounds(444, 198, 80, 30)
+    $cancelButton.Add_Click({
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $form.Close()
+    })
+    $form.Controls.Add($cancelButton)
+
+    $form.AcceptButton = $okButton
+    $form.CancelButton = $cancelButton
+    $form.Add_Shown({ $codeBox.Focus() })
+    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+
+    $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        return [string]$form.Tag
+    }
+    return $null
+}
+
+function Open-WebUrlGui {
+    param(
+        [string]$Url,
+        [object]$Owner
+    )
+    $normalized = ConvertTo-WebUrl -Url $Url
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+        Show-GuiMessage -Text "URL is empty or invalid." -Title "Open URL" -Kind Warning -Owner $Owner
+        return
+    }
+    try {
+        Start-Process -FilePath $normalized | Out-Null
+    } catch {
+        Show-GuiMessage -Text "Unable to open URL on this system." -Title "Open URL" -Kind Error -Owner $Owner
+    }
+}
+
+function Show-GuiEntryEditor {
+    param(
+        $Existing,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return $null }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = if ($null -ne $Existing) { "Edit Entry" } else { "Add Entry" }
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $false
+    $form.ClientSize = New-Object System.Drawing.Size(660, 600)
+
+    $fieldConfigs = @(
+        @{ Name = "Title"; Label = "Name"; Multiline = $false; Password = $false }
+        @{ Name = "Url"; Label = "URL"; Multiline = $false; Password = $false }
+        @{ Name = "Username"; Label = "Username"; Multiline = $false; Password = $false }
+        @{ Name = "Password"; Label = "Password"; Multiline = $false; Password = $true }
+        @{ Name = "Phone"; Label = "Phone"; Multiline = $false; Password = $false }
+        @{ Name = "Email"; Label = "Email"; Multiline = $false; Password = $false }
+        @{ Name = "Notes"; Label = "Notes"; Multiline = $true; Password = $false }
+        @{ Name = "Other"; Label = "Other"; Multiline = $true; Password = $false }
+    )
+
+    $inputs = @{}
+    $y = 16
+    foreach ($config in $fieldConfigs) {
+        $label = New-Object System.Windows.Forms.Label
+        $label.Text = $config.Label
+        $label.SetBounds(16, $y, 120, 18)
+        $form.Controls.Add($label)
+
+        $height = if ($config.Multiline) { 72 } else { 24 }
+        $input = New-Object System.Windows.Forms.TextBox
+        $input.SetBounds(16, $y + 20, 628, $height)
+        if ($config.Multiline) {
+            $input.Multiline = $true
+            $input.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+        }
+        if ($config.Password) {
+            $input.UseSystemPasswordChar = $true
+        }
+        if ($null -ne $Existing) {
+            $input.Text = [string]($Existing.$($config.Name))
+        }
+        $inputs[$config.Name] = $input
+        $form.Controls.Add($input)
+
+        if ($config.Password) {
+            $showCheck = New-Object System.Windows.Forms.CheckBox
+            $showCheck.Text = "Show password"
+            $showCheck.SetBounds(526, $y - 1, 118, 18)
+            $showCheck.Add_CheckedChanged({
+                $inputs["Password"].UseSystemPasswordChar = (-not $showCheck.Checked)
+            })
+            $form.Controls.Add($showCheck)
+        }
+
+        $y += if ($config.Multiline) { 104 } else { 52 }
+    }
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = if ($null -ne $Existing) { "Save" } else { "Add" }
+    $okButton.SetBounds(468, 556, 82, 30)
+    $okButton.Add_Click({
+        $title = $inputs["Title"].Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($title)) {
+            Show-GuiMessage -Text "Entry name is required." -Title $form.Text -Kind Warning -Owner $form
+            return
+        }
+        $values = [ordered]@{
+            Title = $title
+            Url = $inputs["Url"].Text.Trim()
+            Username = $inputs["Username"].Text.Trim()
+            Password = $inputs["Password"].Text
+            Phone = $inputs["Phone"].Text.Trim()
+            Email = $inputs["Email"].Text.Trim()
+            Notes = $inputs["Notes"].Text.Trim()
+            Other = $inputs["Other"].Text.Trim()
+        }
+        $form.Tag = $values
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.SetBounds(562, 556, 82, 30)
+    $cancelButton.Add_Click({
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $form.Close()
+    })
+    $form.Controls.Add($cancelButton)
+
+    $form.AcceptButton = $okButton
+    $form.CancelButton = $cancelButton
+    $form.Add_Shown({ $inputs["Title"].Focus() })
+    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+
+    $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+
+    $values = $form.Tag
+    if ($null -ne $Existing) {
+        $Existing.Title = $values.Title
+        $Existing.Url = $values.Url
+        $Existing.Username = $values.Username
+        $Existing.Password = $values.Password
+        $Existing.Phone = $values.Phone
+        $Existing.Email = $values.Email
+        $Existing.Notes = $values.Notes
+        $Existing.Other = $values.Other
+        $Existing.UpdatedAt = (Get-Date).ToString("s")
+        return $Existing
+    }
+
+    return [ordered]@{
+        Id = [guid]::NewGuid().ToString()
+        Title = $values.Title
+        Url = $values.Url
+        Username = $values.Username
+        Password = $values.Password
+        Phone = $values.Phone
+        Email = $values.Email
+        Notes = $values.Notes
+        Other = $values.Other
+        UpdatedAt = (Get-Date).ToString("s")
+    }
+}
+
+function Confirm-VaultTwoFactorGui {
+    param(
+        [string]$VaultPath,
+        $Meta,
+        $Data,
+        [byte[]]$Key,
+        [byte[]]$MacKey,
+        [switch]$IgnoreTrust,
+        [string]$Reason,
+        [object]$Owner
+    )
+    $secret = Get-VaultTotpSecret -VaultData $Data
+    if ([string]::IsNullOrWhiteSpace($secret)) { return $true }
+
+    $needsSave = $false
+    $vaultId = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
+    if ([string]::IsNullOrWhiteSpace($vaultId)) {
+        $vaultId = Ensure-VaultId -Meta $Meta
+        $needsSave = $true
+    }
+
+    if (-not $IgnoreTrust) {
+        if (Test-TrustToken -VaultId $vaultId -Secret $secret) {
+            return $true
+        }
+    }
+
+    while ($true) {
+        $prompt = if ([string]::IsNullOrWhiteSpace($Reason)) {
+            "Enter the 6-digit code from your authenticator."
+        } else {
+            $Reason
+        }
+        $code = Show-GuiPromptDialog -Title "Two-factor authentication" -Prompt $prompt -OkText "Verify" -Owner $Owner
+        if ([string]::IsNullOrWhiteSpace($code)) { return $false }
+        if (Test-TotpCode -Secret $secret -Code $code) {
+            if (-not $IgnoreTrust) {
+                $expires = [DateTime]::UtcNow.AddHours(24)
+                Save-TrustToken -VaultId $vaultId -Secret $secret -ExpiresTicks $expires.Ticks | Out-Null
+            }
+            if ($needsSave -and $VaultPath -and $Meta -and $Data -and $Key) {
+                Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+            }
+            return $true
+        }
+        $choice = Show-GuiChoiceDialog -Title "Invalid 2FA code" -Message "The code was not accepted." -Options @("Retry", "Abort") -Owner $Owner
+        if ($choice -ne "Retry") { return $false }
+    }
+}
+
+function Open-VaultGui {
+    param(
+        [string]$VaultPath,
+        [string]$AccountName,
+        [switch]$CreateIfMissing,
+        [object]$Owner
+    )
+    if (-not (Test-Path $VaultPath)) {
+        if (-not $CreateIfMissing) {
+            Show-GuiMessage -Text "Vault not found." -Title "Open Vault" -Kind Error -Owner $Owner
+            return $null
+        }
+        $title = if ($AccountName) { "Set master password for vault $AccountName" } else { "Set master password" }
+        $password = Read-GuiConfirmedSecret -Title $title -Prompt "Create master password" -ConfirmPrompt "Confirm master password" -Owner $Owner
+        if ([string]::IsNullOrEmpty($password)) { return $null }
+        $salt = New-RandomBytes 16
+        $iterations = 100000
+        $pair = Get-KeyPairFromPassword -Password $password -Salt $salt -Iterations $iterations
+        if ($null -eq $pair) {
+            Show-GuiMessage -Text "Unable to derive vault key." -Title "Create Vault" -Kind Error -Owner $Owner
+            return $null
+        }
+        $data = [ordered]@{ Entries = @() }
+        $meta = [ordered]@{
+            Version = 2
+            VaultId = [guid]::NewGuid().ToString()
+            AccountName = $AccountName
+            Salt = [Convert]::ToBase64String($salt)
+            Iterations = $iterations
+            IV = ""
+            Data = ""
+        }
+        Save-Vault -VaultPath $VaultPath -Key $pair.EncKey -MacKey $pair.MacKey -Meta $meta -Data $data
+        $password = $null
+        return @{
+            Meta = $meta
+            Data = $data
+            Key = $pair.EncKey
+            MacKey = $pair.MacKey
+        }
+    }
+
+    try {
+        $meta = Get-Content -Path $VaultPath -Raw | ConvertFrom-Json
+    } catch {
+        Show-GuiMessage -Text "Vault file is corrupted or unreadable." -Title "Open Vault" -Kind Error -Owner $Owner
+        return $null
+    }
+    if (-not (Test-VaultMeta -Meta $meta)) {
+        Show-GuiMessage -Text "Vault file is invalid." -Title "Open Vault" -Kind Error -Owner $Owner
+        return $null
+    }
+    try {
+        $salt = [Convert]::FromBase64String($meta.Salt)
+    } catch {
+        Show-GuiMessage -Text "Vault encryption salt is invalid." -Title "Open Vault" -Kind Error -Owner $Owner
+        return $null
+    }
+
+    $iterations = [int]$meta.Iterations
+    $recoveryAvailable = Test-RecoveryMeta -Meta $meta
+    $mode = "password"
+
+    while ($true) {
+        if ($mode -eq "password") {
+            $title = if ($meta.AccountName) { "Unlock vault $($meta.AccountName)" } else { "Unlock vault" }
+            $password = Show-GuiPromptDialog -Title $title -Prompt "Master password" -IsPassword -OkText "Unlock" -Owner $Owner
+            if ([string]::IsNullOrEmpty($password)) { return $null }
+            $pair = Get-KeyPairFromPassword -Password $password -Salt $salt -Iterations $iterations
+            if ($null -eq $pair) {
+                Show-GuiMessage -Text "Unable to derive vault key." -Title $title -Kind Error -Owner $Owner
+                continue
+            }
+            try {
+                $data = Get-DataFromMeta -Meta $meta -Key $pair.EncKey -MacKey $pair.MacKey
+                if (-not (Confirm-VaultTwoFactorGui -VaultPath $VaultPath -Meta $meta -Data $data -Key $pair.EncKey -MacKey $pair.MacKey -Owner $Owner)) {
+                    return $null
+                }
+                return @{
+                    Meta = $meta
+                    Data = $data
+                    Key = $pair.EncKey
+                    MacKey = $pair.MacKey
+                }
+            } catch {
+                Show-GuiMessage -Text "Invalid password or vault corrupted." -Title $title -Kind Error -Owner $Owner
+                if (-not $recoveryAvailable) { continue }
+                $choice = Show-GuiChoiceDialog -Title "Unlock failed" -Message "A recovery password is configured for this vault." -Options @("Retry", "Use Recovery", "Abort") -Owner $Owner
+                if ($choice -eq "Use Recovery") {
+                    $mode = "recovery"
+                    continue
+                }
+                if ($choice -ne "Retry") { return $null }
+            } finally {
+                $password = $null
+            }
+        } else {
+            $recoveryPassword = Show-GuiPromptDialog -Title "Recovery password" -Prompt "Enter recovery password" -IsPassword -OkText "Unlock" -Owner $Owner
+            if ([string]::IsNullOrEmpty($recoveryPassword)) { return $null }
+            $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
+            $recoveryPassword = $null
+            if ($null -eq $recoveryMaterial) {
+                Show-GuiMessage -Text "Invalid recovery password or vault corrupted." -Title "Recovery Unlock" -Kind Error -Owner $Owner
+                $choice = Show-GuiChoiceDialog -Title "Recovery failed" -Message "Recovery unlock did not succeed." -Options @("Retry Recovery", "Back") -Owner $Owner
+                if ($choice -ne "Retry Recovery") {
+                    $mode = "password"
+                }
+                continue
+            }
+            try {
+                $recoveryPair = Split-KeyMaterial -Material $recoveryMaterial
+                if ($null -eq $recoveryPair) {
+                    $recoveryPair = @{ EncKey = $recoveryMaterial; MacKey = $null }
+                }
+                if ((Test-VaultMacRequired -Meta $meta) -and ($null -eq $recoveryPair.MacKey)) {
+                    Show-GuiMessage -Text "Recovery password must be updated to unlock this vault." -Title "Recovery Unlock" -Kind Error -Owner $Owner
+                    $mode = "password"
+                    continue
+                }
+                $data = Get-DataFromMeta -Meta $meta -Key $recoveryPair.EncKey -MacKey $recoveryPair.MacKey
+                if (-not (Confirm-VaultTwoFactorGui -VaultPath $VaultPath -Meta $meta -Data $data -Key $recoveryPair.EncKey -MacKey $recoveryPair.MacKey -Owner $Owner)) {
+                    return $null
+                }
+                return @{
+                    Meta = $meta
+                    Data = $data
+                    Key = $recoveryPair.EncKey
+                    MacKey = $recoveryPair.MacKey
+                }
+            } catch {
+                Show-GuiMessage -Text "Invalid recovery password or vault corrupted." -Title "Recovery Unlock" -Kind Error -Owner $Owner
+                $choice = Show-GuiChoiceDialog -Title "Recovery failed" -Message "Recovery unlock did not succeed." -Options @("Retry Recovery", "Back") -Owner $Owner
+                if ($choice -ne "Retry Recovery") {
+                    $mode = "password"
+                }
+            }
+        }
+    }
+}
+
+function New-AccountGui {
+    param(
+        [array]$Accounts,
+        [object]$Owner
+    )
+    $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
+    while ($true) {
+        $name = Show-GuiPromptDialog -Title "Create Vault" -Prompt "Vault name" -OkText "Create" -Owner $Owner
+        if ($null -eq $name) { return $null }
+        $trimmed = $name.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            Show-GuiMessage -Text "Vault name is required." -Title "Create Vault" -Kind Warning -Owner $Owner
+            continue
+        }
+        $exists = $accounts | Where-Object { $_.Name -ieq $trimmed }
+        if ($exists) {
+            Show-GuiMessage -Text "Vault already exists." -Title "Create Vault" -Kind Error -Owner $Owner
+            continue
+        }
+        $fileName = Get-AccountFileName -AccountName $trimmed
+        $vaultPath = Get-VaultPath -FileName $fileName
+        $vault = Open-VaultGui -VaultPath $vaultPath -AccountName $trimmed -CreateIfMissing -Owner $Owner
+        if ($null -eq $vault) { return $null }
+        $account = [ordered]@{
+            Name = $trimmed
+            File = $fileName
+            CreatedAt = (Get-Date).ToString("s")
+        }
+        $accounts += $account
+        Save-Accounts -Accounts $accounts
+        return @{
+            Accounts = $accounts
+            Account = $account
+            Vault = $vault
+        }
+    }
+}
+
+function Import-VaultDataGui {
+    param(
+        [array]$Accounts,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return $null }
+    $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
+
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+    $dialog.Title = "Import Vault"
+    $dialog.RestoreDirectory = $true
+    $result = if ($null -ne $Owner) { $dialog.ShowDialog($Owner) } else { $dialog.ShowDialog() }
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+
+    $path = $dialog.FileName
+    if (-not (Test-PathSafe -Path $path)) {
+        Show-GuiMessage -Text "Import file path is invalid or not found." -Title "Import Vault" -Kind Error -Owner $Owner
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+
+    try {
+        $meta = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    } catch {
+        Show-GuiMessage -Text "Import file is corrupted or unreadable." -Title "Import Vault" -Kind Error -Owner $Owner
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+    if (-not (Test-VaultMeta -Meta $meta)) {
+        Show-GuiMessage -Text "Import file is not a valid vault." -Title "Import Vault" -Kind Error -Owner $Owner
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+
+    $baseName = $meta.AccountName
+    if ([string]::IsNullOrWhiteSpace($baseName)) {
+        $baseName = Get-AccountNameFromFile -FileName ([IO.Path]::GetFileName($path))
+    }
+    $name = Get-UniqueAccountName -Accounts $accounts -BaseName $baseName
+    $fileName = Get-AccountFileName -AccountName $name
+    $destination = Get-VaultPath -FileName $fileName
+    if (Test-Path $destination) {
+        Show-GuiMessage -Text "Vault already exists. Import aborted." -Title "Import Vault" -Kind Error -Owner $Owner
+        return @{ Accounts = $accounts; Imported = $false }
+    }
+
+    $meta.AccountName = $name
+    $json = $meta | ConvertTo-Json -Depth 6
+    $dir = Split-Path -Parent $destination
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+    }
+    Set-Content -Path $destination -Value $json -Encoding UTF8
+
+    $account = [ordered]@{
+        Name = $name
+        File = $fileName
+        CreatedAt = (Get-Date).ToString("s")
+    }
+    $accounts += $account
+    Save-Accounts -Accounts $accounts
+    Show-GuiMessage -Text ("Imported vault '{0}'." -f $name) -Title "Import Vault" -Owner $Owner
+    return @{
+        Accounts = $accounts
+        Imported = $true
+        Account = $account
+    }
+}
+
+function Import-CsvEntriesGui {
+    param(
+        [array]$Entries,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return @{ Entries = $Entries; Imported = 0 } }
+    $entries = if ($null -eq $Entries) { @() } else { @($Entries) }
+
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
+    $dialog.Title = "Import CSV Entries"
+    $dialog.RestoreDirectory = $true
+    $result = if ($null -ne $Owner) { $dialog.ShowDialog($Owner) } else { $dialog.ShowDialog() }
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        return @{ Entries = $entries; Imported = 0 }
+    }
+
+    $path = $dialog.FileName
+    if (-not (Test-PathSafe -Path $path)) {
+        Show-GuiMessage -Text "CSV path is invalid or not found." -Title "Import CSV" -Kind Error -Owner $Owner
+        return @{ Entries = $entries; Imported = 0 }
+    }
+
+    try {
+        $rows = Import-Csv -LiteralPath $path
+    } catch {
+        Show-GuiMessage -Text "CSV file is unreadable." -Title "Import CSV" -Kind Error -Owner $Owner
+        return @{ Entries = $entries; Imported = 0 }
+    }
+    if ($null -eq $rows) {
+        Show-GuiMessage -Text "CSV file contains no rows." -Title "Import CSV" -Kind Warning -Owner $Owner
+        return @{ Entries = $entries; Imported = 0 }
+    }
+
+    $rows = @($rows)
+    if ($rows.Count -gt 0 -and $rows[0].PSObject.Properties.Count -eq 1) {
+        $header = $rows[0].PSObject.Properties[0].Name
+        if ($header -like "*;*") {
+            try {
+                $rows = @(Import-Csv -LiteralPath $path -Delimiter ';')
+            } catch {
+                Show-GuiMessage -Text "CSV delimiter not supported." -Title "Import CSV" -Kind Error -Owner $Owner
+                return @{ Entries = $entries; Imported = 0 }
+            }
+        }
+    }
+
+    $added = 0
+    foreach ($row in $rows) {
+        $entry = Convert-CsvRowToEntry -Row $row
+        if ($null -ne $entry) {
+            $entries += $entry
+            $added++
+        }
+    }
+
+    if ($added -eq 0) {
+        Show-GuiMessage -Text "No valid entries found." -Title "Import CSV" -Kind Warning -Owner $Owner
+    } else {
+        Show-GuiMessage -Text ("Imported {0} entries." -f $added) -Title "Import CSV" -Owner $Owner
+    }
+    return @{ Entries = $entries; Imported = $added }
+}
+
+function Export-VaultDataGui {
+    param(
+        [string]$AccountName,
+        $VaultData,
+        $VaultMeta,
+        [string]$VaultPath,
+        [byte[]]$VaultKey,
+        [byte[]]$VaultMacKey,
+        [object]$Owner
+    )
+    if (-not (Confirm-VaultTwoFactorGui -VaultPath $VaultPath -Meta $VaultMeta -Data $VaultData -Key $VaultKey -MacKey $VaultMacKey -IgnoreTrust -Reason "Export requires a 2FA check." -Owner $Owner)) {
+        return $false
+    }
+
+    if (-not (Initialize-GuiFramework)) { return $false }
+    $baseName = Get-SafeFileBaseName -Name $AccountName -Fallback "vault"
+    $defaultName = "{0}_export.json" -f $baseName
+
+    $dialog = New-Object System.Windows.Forms.SaveFileDialog
+    $dialog.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+    $dialog.FileName = $defaultName
+    $dialog.Title = "Export Vault"
+    $dialog.RestoreDirectory = $true
+    $result = if ($null -ne $Owner) { $dialog.ShowDialog($Owner) } else { $dialog.ShowDialog() }
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $false }
+
+    $exportChoice = Show-GuiChoiceDialog -Title "Export Protection" -Message "Choose how to protect the export file." -Options @("Use master password", "Create export password", "Cancel") -Owner $Owner
+    if ($exportChoice -ne "Use master password" -and $exportChoice -ne "Create export password") { return $false }
+
+    $exportKey = $null
+    $exportMacKey = $null
+    $salt = $null
+    $iterations = $null
+    if ($exportChoice -eq "Use master password") {
+        $exportKey = $VaultKey
+        $exportMacKey = $VaultMacKey
+        if ($null -eq $exportKey -or $exportKey.Length -ne 32) {
+            Show-GuiMessage -Text "Export keys unavailable in this session." -Title "Export Vault" -Kind Error -Owner $Owner
+            return $false
+        }
+        $salt = [Convert]::FromBase64String($VaultMeta.Salt)
+        $iterations = [int]$VaultMeta.Iterations
+    } else {
+        $exportPassword = Read-GuiConfirmedSecret -Title "Export Vault" -Prompt "Create export password" -ConfirmPrompt "Confirm export password" -Owner $Owner
+        if ([string]::IsNullOrEmpty($exportPassword)) { return $false }
+        $salt = New-RandomBytes 16
+        $iterations = 100000
+        $pair = Get-KeyPairFromPassword -Password $exportPassword -Salt $salt -Iterations $iterations
+        if ($null -eq $pair) {
+            Show-GuiMessage -Text "Unable to derive export key." -Title "Export Vault" -Kind Error -Owner $Owner
+            return $false
+        }
+        $exportKey = $pair.EncKey
+        $exportMacKey = $pair.MacKey
+    }
+
+    $exportData = Copy-VaultData -VaultData $VaultData
+    Remove-VaultTotpSecret -VaultData $exportData
+    $meta = [ordered]@{
+        Version = 2
+        VaultId = [guid]::NewGuid().ToString()
+        AccountName = $AccountName
+        Salt = [Convert]::ToBase64String($salt)
+        Iterations = $iterations
+        IV = ""
+        Data = ""
+    }
+    Save-Vault -VaultPath $dialog.FileName -Key $exportKey -MacKey $exportMacKey -Meta $meta -Data $exportData
+    Show-GuiMessage -Text "Vault exported." -Title "Export Vault" -Owner $Owner
+    return $true
+}
+
+function Show-GuiRecoverySettings {
+    param(
+        [string]$VaultPath,
+        [string]$AccountName,
+        $Meta,
+        $Data,
+        [byte[]]$Key,
+        [byte[]]$MacKey,
+        [object]$Owner
+    )
+    if ($null -eq $Key -or $Key.Length -ne 32) {
+        Show-GuiMessage -Text "Recovery options unavailable for this vault session." -Title "Recovery" -Kind Error -Owner $Owner
+        return $false
+    }
+    if ((Test-VaultMacRequired -Meta $Meta) -and ($null -eq $MacKey -or $MacKey.Length -ne 32)) {
+        Show-GuiMessage -Text "Recovery options unavailable without a valid vault signature key." -Title "Recovery" -Kind Error -Owner $Owner
+        return $false
+    }
+
+    while ($true) {
+        $hasRecovery = Test-RecoveryMeta -Meta $Meta
+        $options = if ($hasRecovery) {
+            @("Update recovery", "Remove recovery", "Close")
+        } else {
+            @("Set recovery", "Close")
+        }
+        $choice = Show-GuiChoiceDialog -Title "Recovery" -Message "Recovery passwords let you unlock this vault if the master password is lost." -Options $options -Owner $Owner
+        if ($null -eq $choice -or $choice -eq "Close") { return $false }
+        if ($choice -eq "Remove recovery") {
+            if (-not (Show-GuiConfirm -Text "Remove recovery password for this vault?" -Title "Recovery" -Owner $Owner)) {
+                continue
+            }
+            Remove-RecoveryFields -Meta $Meta
+            Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+            Show-GuiMessage -Text "Recovery password removed." -Title "Recovery" -Owner $Owner
+            return $true
+        }
+
+        $title = if ($AccountName) { "Set recovery password for vault $AccountName" } else { "Set recovery password" }
+        $recoveryPassword = Read-GuiConfirmedSecret -Title $title -Prompt "Create recovery password" -ConfirmPrompt "Confirm recovery password" -Owner $Owner
+        if ([string]::IsNullOrEmpty($recoveryPassword)) { return $false }
+
+        $salt = New-RandomBytes 16
+        $iterations = 100000
+        $recoveryKey = Get-KeyFromPassword -Password $recoveryPassword -Salt $salt -Iterations $iterations
+        $material = Get-CombinedKeyMaterial -EncKey $Key -MacKey $MacKey
+        $wrapped = Protect-Bytes -PlainBytes $material -Key $recoveryKey
+        $Meta.RecoverySalt = [Convert]::ToBase64String($salt)
+        $Meta.RecoveryIterations = $iterations
+        $Meta.RecoveryKeyIV = $wrapped.IV
+        $Meta.RecoveryKeyData = $wrapped.Data
+        Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+        Show-GuiMessage -Text "Recovery password saved." -Title "Recovery" -Owner $Owner
+        return $true
+    }
+}
+
+function Show-GuiTwoFactorSettings {
+    param(
+        [string]$VaultPath,
+        $Meta,
+        $Data,
+        [byte[]]$Key,
+        [byte[]]$MacKey,
+        [object]$Owner
+    )
+    if ($null -eq $Key -or $Key.Length -ne 32 -or $null -eq $MacKey -or $MacKey.Length -ne 32) {
+        Show-GuiMessage -Text "2FA settings unavailable for this vault session." -Title "2FA Settings" -Kind Error -Owner $Owner
+        return $false
+    }
+
+    while ($true) {
+        $secret = Get-VaultTotpSecret -VaultData $Data
+        if ([string]::IsNullOrWhiteSpace($secret)) {
+            $choice = Show-GuiChoiceDialog -Title "2FA Settings" -Message "Enable offline 2FA using a TOTP authenticator." -Options @("Enable 2FA", "Close") -Owner $Owner
+            if ($choice -ne "Enable 2FA") { return $false }
+        } else {
+            $choice = Show-GuiChoiceDialog -Title "2FA Settings" -Message "2FA is enabled. Trusted devices stay unlocked for 24 hours." -Options @("Show secret", "Reconfigure 2FA", "Disable 2FA", "Close") -Owner $Owner
+            if ($null -eq $choice -or $choice -eq "Close") { return $false }
+            if ($choice -eq "Show secret") {
+                Show-GuiReadOnlyTextDialog -Title "2FA Secret Key" -Prompt "Enter this secret into Google Authenticator, Authy, or Ente." -Value (Format-TotpSecret -Secret $secret) -Owner $Owner
+                continue
+            }
+            if ($choice -eq "Disable 2FA") {
+                if (-not (Show-GuiConfirm -Text "Disable 2FA for this vault?" -Title "2FA Settings" -Owner $Owner)) {
+                    continue
+                }
+                Remove-VaultTotpSecret -VaultData $Data
+                $vaultId = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
+                if ($vaultId) { Remove-TrustToken -VaultId $vaultId }
+                Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+                Show-GuiMessage -Text "2FA disabled." -Title "2FA Settings" -Owner $Owner
+                return $true
+            }
+        }
+
+        $newSecret = New-TotpSecret
+        $code = Show-GuiTotpSetupDialog -Title "Enable 2FA" -Prompt "Add this secret to your authenticator, then enter the 6-digit code to confirm." -Secret (Format-TotpSecret -Secret $newSecret) -Owner $Owner
+        if ([string]::IsNullOrWhiteSpace($code)) { return $false }
+        if (-not (Test-TotpCode -Secret $newSecret -Code $code)) {
+            Show-GuiMessage -Text "Invalid 2FA code." -Title "2FA Settings" -Kind Error -Owner $Owner
+            continue
+        }
+
+        Set-VaultTotpSecret -VaultData $Data -Secret $newSecret
+        $vaultId = Ensure-VaultId -Meta $Meta
+        Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
+        $expires = [DateTime]::UtcNow.AddHours(24)
+        Save-TrustToken -VaultId $vaultId -Secret $newSecret -ExpiresTicks $expires.Ticks | Out-Null
+        Show-GuiMessage -Text "2FA enabled and this device is trusted for 24 hours." -Title "2FA Settings" -Owner $Owner
+        return $true
+    }
+}
+
+function Show-VaultGui {
+    param(
+        [string]$VaultPath,
+        $Vault,
+        [object]$Owner
+    )
+    if (-not (Initialize-GuiFramework)) { return }
+
+    $vaultMeta = $Vault.Meta
+    $vaultData = $Vault.Data
+    $vaultKey = $Vault.Key
+    $vaultMacKey = $Vault.MacKey
+    if ($null -eq $vaultData.Entries) {
+        $vaultData | Add-Member -NotePropertyName Entries -NotePropertyValue @() -Force
+    }
+    $state = [ordered]@{
+        SelectedEntryId = $null
+    }
+
+    $form = New-Object System.Windows.Forms.Form
+    $title = if ($vaultMeta.AccountName) { "$script:AppName - $($vaultMeta.AccountName)" } else { "$script:AppName - Vault" }
+    $form.Text = $title
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.ClientSize = New-Object System.Drawing.Size(1035, 610)
+    $form.MinimumSize = New-Object System.Drawing.Size(1051, 649)
+
+    $searchLabel = New-Object System.Windows.Forms.Label
+    $searchLabel.Text = "Search"
+    $searchLabel.SetBounds(16, 18, 48, 18)
+    $form.Controls.Add($searchLabel)
+
+    $searchBox = New-Object System.Windows.Forms.TextBox
+    $searchBox.SetBounds(70, 14, 320, 24)
+    $form.Controls.Add($searchBox)
+
+    $statusLabel = New-Object System.Windows.Forms.Label
+    $statusLabel.SetBounds(410, 18, 360, 18)
+    $form.Controls.Add($statusLabel)
+
+    $themeButton = New-Object System.Windows.Forms.Button
+    $themeButton.SetBounds(796, 12, 223, 30)
+    $form.Controls.Add($themeButton)
+
+    $grid = New-Object System.Windows.Forms.DataGridView
+    $grid.SetBounds(16, 50, 760, 350)
+    $grid.AutoGenerateColumns = $false
+    $grid.ReadOnly = $true
+    $grid.AllowUserToAddRows = $false
+    $grid.AllowUserToDeleteRows = $false
+    $grid.AllowUserToResizeRows = $false
+    $grid.MultiSelect = $false
+    $grid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $grid.RowHeadersVisible = $false
+    $grid.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::None
+    $form.Controls.Add($grid)
+
+    $columns = @(
+        @{ Name = "EntryId"; Header = "EntryId"; Property = "EntryId"; Width = 5; Visible = $false }
+        @{ Name = "Title"; Header = "Name"; Property = "Title"; Width = 240; Visible = $true }
+        @{ Name = "Url"; Header = "URL"; Property = "Url"; Width = 260; Visible = $true }
+        @{ Name = "Username"; Header = "Username"; Property = "Username"; Width = 150; Visible = $true }
+        @{ Name = "UpdatedAt"; Header = "Updated"; Property = "UpdatedAt"; Width = 110; Visible = $true }
+    )
+    foreach ($columnSpec in $columns) {
+        $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $column.Name = $columnSpec.Name
+        $column.HeaderText = $columnSpec.Header
+        $column.DataPropertyName = $columnSpec.Property
+        $column.Width = $columnSpec.Width
+        $column.Visible = $columnSpec.Visible
+        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        [void]$grid.Columns.Add($column)
+    }
+
+    $detailsGroup = New-Object System.Windows.Forms.GroupBox
+    $detailsGroup.Text = "Selected Entry"
+    $detailsGroup.SetBounds(16, 414, 1003, 180)
+    $form.Controls.Add($detailsGroup)
+
+    $detailsBox = New-Object System.Windows.Forms.TextBox
+    $detailsBox.Multiline = $true
+    $detailsBox.ReadOnly = $true
+    $detailsBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $detailsBox.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $detailsGroup.Controls.Add($detailsBox)
+
+    $buttonSpecs = @(
+        @{ Name = "add"; Label = "Add Entry"; Top = 50 }
+        @{ Name = "edit"; Label = "Edit Entry"; Top = 86 }
+        @{ Name = "delete"; Label = "Delete Entry"; Top = 122 }
+        @{ Name = "copy-user"; Label = "Copy Username"; Top = 158 }
+        @{ Name = "copy-pass"; Label = "Copy Password"; Top = 194 }
+        @{ Name = "open-url"; Label = "Open URL"; Top = 230 }
+        @{ Name = "import-csv"; Label = "Import CSV"; Top = 266 }
+        @{ Name = "export"; Label = "Export Vault"; Top = 302 }
+        @{ Name = "twofactor"; Label = "2FA Settings"; Top = 338 }
+        @{ Name = "recovery"; Label = "Recovery"; Top = 374 }
+        @{ Name = "lock"; Label = "Lock Vault"; Top = 410 }
+    )
+    $buttons = @{}
+    foreach ($buttonSpec in $buttonSpecs) {
+        $button = New-Object System.Windows.Forms.Button
+        $button.Text = $buttonSpec.Label
+        $button.SetBounds(796, $buttonSpec.Top, 223, 30)
+        $buttons[$buttonSpec.Name] = $button
+        $form.Controls.Add($button)
+    }
+
+    $getSelectedEntry = {
+        $row = $null
+        if ($null -ne $grid.CurrentRow -and $grid.CurrentRow.Index -ge 0) {
+            $row = $grid.CurrentRow
+        } elseif ($grid.SelectedRows.Count -gt 0) {
+            $row = $grid.SelectedRows[0]
+        }
+        if ($null -eq $row) { return $null }
+        $entryId = [string]$row.Cells["EntryId"].Value
+        if ([string]::IsNullOrWhiteSpace($entryId)) { return $null }
+        foreach ($entry in $vaultData.Entries) {
+            if ($entry.Id -eq $entryId) {
+                return $entry
+            }
+        }
+        return $null
+    }
+
+    $refreshDetails = {
+        $entry = & $getSelectedEntry
+        if ($null -eq $entry) {
+            $detailsBox.Text = "Select an entry to inspect its fields."
+            return
+        }
+        $fields = @(
+            @{ Label = "Name"; Value = $entry.Title }
+            @{ Label = "URL"; Value = $entry.Url }
+            @{ Label = "Username"; Value = $entry.Username }
+            @{ Label = "Password"; Value = if ([string]::IsNullOrWhiteSpace($entry.Password)) { "" } else { "(hidden - use Copy Password)" } }
+            @{ Label = "Phone"; Value = $entry.Phone }
+            @{ Label = "Email"; Value = $entry.Email }
+            @{ Label = "Notes"; Value = $entry.Notes }
+            @{ Label = "Other"; Value = $entry.Other }
+            @{ Label = "Updated"; Value = $entry.UpdatedAt }
+        )
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($field in $fields) {
+            $value = if ([string]::IsNullOrWhiteSpace([string]$field.Value)) { "(empty)" } else { [string]$field.Value }
+            $lines.Add($field.Label) | Out-Null
+            $lines.Add($value) | Out-Null
+            $lines.Add("") | Out-Null
+        }
+        $detailsBox.Text = (($lines.ToArray()) -join [Environment]::NewLine).TrimEnd()
+    }
+
+    $refreshGrid = {
+        $filterResult = Get-FilteredEntries -Entries $vaultData.Entries -SearchTerm $searchBox.Text
+        $entries = @($filterResult.Entries)
+
+        $table = New-Object System.Data.DataTable
+        [void]$table.Columns.Add("EntryId")
+        [void]$table.Columns.Add("Title")
+        [void]$table.Columns.Add("Url")
+        [void]$table.Columns.Add("Username")
+        [void]$table.Columns.Add("UpdatedAt")
+        foreach ($entry in $entries) {
+            $row = $table.NewRow()
+            $row["EntryId"] = $entry.Id
+            $row["Title"] = $entry.Title
+            $row["Url"] = $entry.Url
+            $row["Username"] = $entry.Username
+            $row["UpdatedAt"] = $entry.UpdatedAt
+            [void]$table.Rows.Add($row)
+        }
+
+        $grid.DataSource = $table
+        $statusLabel.Text = if ([string]::IsNullOrWhiteSpace($searchBox.Text)) {
+            "{0} entries" -f $vaultData.Entries.Count
+        } else {
+            "{0} matching of {1} entries" -f $entries.Count, $vaultData.Entries.Count
+        }
+
+        if ($grid.Rows.Count -gt 0) {
+            $targetRow = 0
+            if (-not [string]::IsNullOrWhiteSpace($state.SelectedEntryId)) {
+                for ($i = 0; $i -lt $grid.Rows.Count; $i++) {
+                    if ([string]$grid.Rows[$i].Cells["EntryId"].Value -eq $state.SelectedEntryId) {
+                        $targetRow = $i
+                        break
+                    }
+                }
+            }
+            $grid.ClearSelection()
+            $grid.Rows[$targetRow].Selected = $true
+            $grid.CurrentCell = $grid.Rows[$targetRow].Cells["Title"]
+        } else {
+            $grid.ClearSelection()
+            $state.SelectedEntryId = $null
+        }
+        & $refreshDetails
+    }
+
+    $applyTheme = {
+        $theme = Get-GuiThemeMode
+        $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
+        Apply-GuiTheme -Control $form -Theme $theme
+    }
+
+    $grid.Add_SelectionChanged({
+        $entry = & $getSelectedEntry
+        if ($null -ne $entry) {
+            $state.SelectedEntryId = $entry.Id
+        } else {
+            $state.SelectedEntryId = $null
+        }
+        & $refreshDetails
+    })
+    $grid.Add_CellDoubleClick({
+        if ($null -ne (& $getSelectedEntry)) {
+            $buttons["edit"].PerformClick()
+        }
+    })
+    $searchBox.Add_TextChanged({ & $refreshGrid })
+    $themeButton.Add_Click({
+        Toggle-GuiThemeMode | Out-Null
+        & $applyTheme
+    })
+
+    $buttons["add"].Add_Click({
+        try {
+            $newEntry = Show-GuiEntryEditor -Owner $form
+            if ($null -ne $newEntry) {
+                $vaultData.Entries += $newEntry
+                Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+                $state.SelectedEntryId = $newEntry.Id
+                & $refreshGrid
+            }
+        } catch {
+            Write-Log ("GUI add entry failed: {0}" -f $_.Exception.Message)
+            Show-GuiMessage -Text "Unable to add the entry." -Title $title -Kind Error -Owner $form
+        }
+    })
+
+    $buttons["edit"].Add_Click({
+        try {
+            $entry = & $getSelectedEntry
+            if ($null -eq $entry) {
+                Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+                return
+            }
+            $updated = Show-GuiEntryEditor -Existing $entry -Owner $form
+            if ($null -ne $updated) {
+                Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+                $state.SelectedEntryId = $updated.Id
+                & $refreshGrid
+            }
+        } catch {
+            Write-Log ("GUI edit entry failed: {0}" -f $_.Exception.Message)
+            Show-GuiMessage -Text "Unable to update the entry." -Title $title -Kind Error -Owner $form
+        }
+    })
+
+    $buttons["delete"].Add_Click({
+        try {
+            $entry = & $getSelectedEntry
+            if ($null -eq $entry) {
+                Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+                return
+            }
+            if (-not (Show-GuiConfirm -Text ("Delete '{0}'?" -f $entry.Title) -Title "Delete Entry" -Owner $form)) {
+                return
+            }
+            $vaultData.Entries = @($vaultData.Entries | Where-Object { $_.Id -ne $entry.Id })
+            Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+            $state.SelectedEntryId = $null
+            & $refreshGrid
+        } catch {
+            Write-Log ("GUI delete entry failed: {0}" -f $_.Exception.Message)
+            Show-GuiMessage -Text "Unable to delete the entry." -Title $title -Kind Error -Owner $form
+        }
+    })
+
+    $buttons["copy-user"].Add_Click({
+        $entry = & $getSelectedEntry
+        if ($null -eq $entry) {
+            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($entry.Username)) {
+            Show-GuiMessage -Text "The selected entry has no username." -Title $title -Kind Warning -Owner $form
+            return
+        }
+        if (-not (Set-ClipboardSafe -Value $entry.Username)) {
+            Show-GuiMessage -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
+        }
+    })
+
+    $buttons["copy-pass"].Add_Click({
+        $entry = & $getSelectedEntry
+        if ($null -eq $entry) {
+            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($entry.Password)) {
+            Show-GuiMessage -Text "The selected entry has no password." -Title $title -Kind Warning -Owner $form
+            return
+        }
+        if (-not (Set-ClipboardSafe -Value $entry.Password)) {
+            Show-GuiMessage -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
+        }
+    })
+
+    $buttons["open-url"].Add_Click({
+        $entry = & $getSelectedEntry
+        if ($null -eq $entry) {
+            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            return
+        }
+        Open-WebUrlGui -Url $entry.Url -Owner $form
+    })
+
+    $buttons["import-csv"].Add_Click({
+        try {
+            $result = Import-CsvEntriesGui -Entries $vaultData.Entries -Owner $form
+            if ($null -ne $result -and $result.Imported -gt 0) {
+                $vaultData.Entries = $result.Entries
+                Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+                if ($vaultData.Entries.Count -gt 0) {
+                    $state.SelectedEntryId = $vaultData.Entries[-1].Id
+                }
+                & $refreshGrid
+            }
+        } catch {
+            Write-Log ("GUI CSV import failed: {0}" -f $_.Exception.Message)
+            Show-GuiMessage -Text "Unable to import the CSV file." -Title $title -Kind Error -Owner $form
+        }
+    })
+
+    $buttons["export"].Add_Click({
+        try {
+            Export-VaultDataGui -AccountName $vaultMeta.AccountName -VaultData $vaultData -VaultMeta $vaultMeta -VaultPath $VaultPath -VaultKey $vaultKey -VaultMacKey $vaultMacKey -Owner $form | Out-Null
+        } catch {
+            Write-Log ("GUI export failed: {0}" -f $_.Exception.Message)
+            Show-GuiMessage -Text "Unable to export the vault." -Title $title -Kind Error -Owner $form
+        }
+    })
+
+    $buttons["twofactor"].Add_Click({
+        try {
+            Show-GuiTwoFactorSettings -VaultPath $VaultPath -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
+        } catch {
+            Write-Log ("GUI 2FA settings failed: {0}" -f $_.Exception.Message)
+            Show-GuiMessage -Text "Unable to open 2FA settings." -Title $title -Kind Error -Owner $form
+        }
+    })
+
+    $buttons["recovery"].Add_Click({
+        try {
+            Show-GuiRecoverySettings -VaultPath $VaultPath -AccountName $vaultMeta.AccountName -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
+        } catch {
+            Write-Log ("GUI recovery settings failed: {0}" -f $_.Exception.Message)
+            Show-GuiMessage -Text "Unable to open recovery settings." -Title $title -Kind Error -Owner $form
+        }
+    })
+
+    $buttons["lock"].Add_Click({
+        $form.Close()
+    })
+
+    $form.Add_Shown({
+        & $applyTheme
+        & $refreshGrid
+    })
+    if ($null -ne $Owner) {
+        [void]$form.ShowDialog($Owner)
+    } else {
+        [void]$form.ShowDialog()
+    }
+}
+
+function Start-VaultXGui {
+    param([array]$Accounts)
+    if (-not (Initialize-GuiFramework)) {
+        Show-Message "GUI mode requires a Windows desktop session with STA PowerShell." ([ConsoleColor]::Red)
+        return @{ Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts); Quit = $false }
+    }
+
+    $state = [ordered]@{
+        Accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
+    }
+    $consoleHidden = $false
+    try {
+        $consoleHidden = Set-ConsoleWindowVisible -Visible:$false
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = "$script:AppName GUI"
+        $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+        $form.ClientSize = New-Object System.Drawing.Size(760, 420)
+        $form.MinimumSize = New-Object System.Drawing.Size(776, 459)
+
+        $titleLabel = New-Object System.Windows.Forms.Label
+        $titleLabel.Text = "$script:AppName GUI"
+        $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+        $titleLabel.SetBounds(20, 16, 220, 30)
+        $form.Controls.Add($titleLabel)
+
+        $subtitleLabel = New-Object System.Windows.Forms.Label
+        $subtitleLabel.Text = "The terminal process stays active while you work in the local window."
+        $subtitleLabel.SetBounds(20, 50, 500, 18)
+        $form.Controls.Add($subtitleLabel)
+
+        $vaultsLabel = New-Object System.Windows.Forms.Label
+        $vaultsLabel.Text = "Vaults"
+        $vaultsLabel.SetBounds(20, 86, 60, 18)
+        $form.Controls.Add($vaultsLabel)
+
+        $vaultList = New-Object System.Windows.Forms.ListBox
+        $vaultList.SetBounds(20, 110, 430, 250)
+        $form.Controls.Add($vaultList)
+
+        $statusLabel = New-Object System.Windows.Forms.Label
+        $statusLabel.SetBounds(20, 372, 430, 18)
+        $form.Controls.Add($statusLabel)
+
+        $themeButton = New-Object System.Windows.Forms.Button
+        $themeButton.SetBounds(568, 16, 160, 30)
+        $form.Controls.Add($themeButton)
+
+        $buttonSpecs = @(
+            @{ Name = "open"; Label = "Open Selected"; Top = 110 }
+            @{ Name = "create"; Label = "Create Vault"; Top = 146 }
+            @{ Name = "import"; Label = "Import Vault"; Top = 182 }
+            @{ Name = "remove"; Label = "Remove Vault"; Top = 218 }
+            @{ Name = "refresh"; Label = "Refresh"; Top = 254 }
+            @{ Name = "open-data"; Label = "Open Data Folder"; Top = 290 }
+            @{ Name = "terminal"; Label = "Return to Terminal"; Top = 326 }
+        )
+        $buttons = @{}
+        foreach ($buttonSpec in $buttonSpecs) {
+            $button = New-Object System.Windows.Forms.Button
+            $button.Text = $buttonSpec.Label
+            $button.SetBounds(488, $buttonSpec.Top, 240, 30)
+            $buttons[$buttonSpec.Name] = $button
+            $form.Controls.Add($button)
+        }
+
+        $refreshAccounts = {
+            $selectedName = if ($vaultList.SelectedIndex -ge 0) { [string]$vaultList.SelectedItem } else { $null }
+            $state.Accounts = @(Sync-AccountsWithVaultFiles -Accounts (Get-Accounts) | Sort-Object Name)
+            $vaultList.BeginUpdate()
+            $vaultList.Items.Clear()
+            foreach ($account in $state.Accounts) {
+                [void]$vaultList.Items.Add($account.Name)
+            }
+            $vaultList.EndUpdate()
+            if ($vaultList.Items.Count -eq 0) {
+                $statusLabel.Text = "No vaults found. Create or import one to get started."
+                return
+            }
+            $targetIndex = -1
+            if (-not [string]::IsNullOrWhiteSpace($selectedName)) {
+                $targetIndex = $vaultList.Items.IndexOf($selectedName)
+            }
+            if ($targetIndex -lt 0) { $targetIndex = 0 }
+            $vaultList.SelectedIndex = $targetIndex
+            $statusLabel.Text = "{0} vault(s) available." -f $state.Accounts.Count
+        }
+
+        $getSelectedAccount = {
+            if ($vaultList.SelectedIndex -lt 0 -or $vaultList.SelectedIndex -ge $state.Accounts.Count) {
+                return $null
+            }
+            return $state.Accounts[$vaultList.SelectedIndex]
+        }
+
+        $applyTheme = {
+            $theme = Get-GuiThemeMode
+            $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
+            Apply-GuiTheme -Control $form -Theme $theme
+        }
+
+        $openSelectedVault = {
+            try {
+                $account = & $getSelectedAccount
+                if ($null -eq $account) {
+                    Show-GuiMessage -Text "Select a vault first." -Title $form.Text -Kind Warning -Owner $form
+                    return
+                }
+                $vaultPath = Get-VaultPath -FileName $account.File
+                $vault = Open-VaultGui -VaultPath $vaultPath -AccountName $account.Name -Owner $form
+                if ($null -ne $vault) {
+                    Show-VaultGui -VaultPath $vaultPath -Vault $vault -Owner $form
+                    & $refreshAccounts
+                }
+            } catch {
+                Write-Log ("GUI open vault failed: {0}" -f $_.Exception.Message)
+                Show-GuiMessage -Text "Unable to open the selected vault." -Title $form.Text -Kind Error -Owner $form
+            }
+        }
+
+        $buttons["open"].Add_Click({ & $openSelectedVault })
+        $vaultList.Add_DoubleClick({ & $openSelectedVault })
+        $themeButton.Add_Click({
+            Toggle-GuiThemeMode | Out-Null
+            & $applyTheme
+        })
+
+        $buttons["create"].Add_Click({
+            try {
+                $created = New-AccountGui -Accounts $state.Accounts -Owner $form
+                if ($null -eq $created) { return }
+                $state.Accounts = $created.Accounts
+                & $refreshAccounts
+                if ($null -ne $created.Account) {
+                    $vaultPath = Get-VaultPath -FileName $created.Account.File
+                    Show-VaultGui -VaultPath $vaultPath -Vault $created.Vault -Owner $form
+                    & $refreshAccounts
+                }
+            } catch {
+                Write-Log ("GUI create vault failed: {0}" -f $_.Exception.Message)
+                Show-GuiMessage -Text "Unable to create a new vault." -Title $form.Text -Kind Error -Owner $form
+            }
+        })
+
+        $buttons["import"].Add_Click({
+            try {
+                $result = Import-VaultDataGui -Accounts $state.Accounts -Owner $form
+                if ($null -ne $result -and $null -ne $result.Accounts) {
+                    $state.Accounts = $result.Accounts
+                    & $refreshAccounts
+                }
+            } catch {
+                Write-Log ("GUI import vault failed: {0}" -f $_.Exception.Message)
+                Show-GuiMessage -Text "Unable to import the vault file." -Title $form.Text -Kind Error -Owner $form
+            }
+        })
+
+        $buttons["remove"].Add_Click({
+            try {
+                $account = & $getSelectedAccount
+                if ($null -eq $account) {
+                    Show-GuiMessage -Text "Select a vault first." -Title $form.Text -Kind Warning -Owner $form
+                    return
+                }
+                $vaultPath = Get-VaultPath -FileName $account.File
+                if (-not (Show-GuiConfirm -Text ("Delete vault '{0}' and its data? This cannot be undone." -f $account.Name) -Title "Remove Vault" -Owner $form)) {
+                    return
+                }
+                if (Test-Path $vaultPath) {
+                    Remove-Item -Path $vaultPath -Force
+                }
+                $state.Accounts = @($state.Accounts | Where-Object { $_.Name -ne $account.Name })
+                Save-Accounts -Accounts $state.Accounts
+                & $refreshAccounts
+                Show-GuiMessage -Text "Vault removed." -Title "Remove Vault" -Owner $form
+            } catch {
+                Write-Log ("GUI remove vault failed: {0}" -f $_.Exception.Message)
+                Show-GuiMessage -Text "Unable to remove the selected vault." -Title $form.Text -Kind Error -Owner $form
+            }
+        })
+
+        $buttons["refresh"].Add_Click({ & $refreshAccounts })
+
+        $buttons["open-data"].Add_Click({
+            try {
+                $dir = Get-AppDir
+                if ([string]::IsNullOrWhiteSpace($dir)) {
+                    Show-GuiMessage -Text "Data folder unavailable." -Title $form.Text -Kind Error -Owner $form
+                    return
+                }
+                if (-not (Test-Path $dir)) {
+                    New-Item -ItemType Directory -Path $dir | Out-Null
+                }
+                Start-Process -FilePath $dir | Out-Null
+            } catch {
+                Write-Log ("GUI open data folder failed: {0}" -f $_.Exception.Message)
+                Show-GuiMessage -Text "Unable to open the data folder." -Title $form.Text -Kind Error -Owner $form
+            }
+        })
+
+        $buttons["terminal"].Add_Click({ $form.Close() })
+
+        $form.Add_Shown({
+            & $applyTheme
+            & $refreshAccounts
+        })
+        [void]$form.ShowDialog()
+    } finally {
+        if ($consoleHidden) {
+            Set-ConsoleWindowVisible -Visible:$true | Out-Null
+        }
+        Clear-Host
+    }
+
+    return @{
+        Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts)
+        Quit = $false
+    }
+}
+
 function Invoke-VaultX {
     Initialize-Settings
     $accounts = Get-Accounts
@@ -3926,6 +5868,16 @@ function Invoke-VaultX {
                         $selectedAccount = [Math]::Max(0, $accounts.Count - 1)
                     }
                 }
+                "gui" {
+                    $guiResult = Start-VaultXGui -Accounts $accounts
+                    if ($null -ne $guiResult -and $null -ne $guiResult.Accounts) {
+                        $accounts = $guiResult.Accounts
+                    } else {
+                        $accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts)
+                    }
+                    $selectedAccount = 0
+                    $menuSection = "main"
+                }
                 "open-data" {
                     Open-AppDataFolder | Out-Null
                 }
@@ -3960,6 +5912,14 @@ if ($Help) {
 
 if ($OpenData) {
     Open-AppDataFolder | Out-Null
+    return
+}
+
+if ($Gui) {
+    $guiResult = Start-VaultXGui -Accounts (Get-Accounts)
+    if ($null -ne $guiResult -and $guiResult.Quit) {
+        Close-VaultX -Message "$script:AppName closed."
+    }
     return
 }
 

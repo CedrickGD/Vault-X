@@ -1,12 +1,15 @@
 # VaultX
 
-TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON vaults live in your profile, managed through a clean terminal menu. Auto-detects new vault files dropped into the data folder. 🔐⚡
+TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON vaults live in your profile, and you can manage them through either the terminal menu or a local Windows GUI. Auto-detects new vault files dropped into the data folder. 🔐⚡
 
 ## Features
 - Local-only vaults stored under your user profile (no cloud sync).
 - AES encryption with per-vault salt and password-derived key.
 - Encrypt-then-MAC integrity (HMAC-SHA256) to detect tampering or corruption.
 - Menu-driven UI with fast navigation and a reliable back option.
+- Optional local Windows GUI mode with vault browser, entry editor, CSV import, export, 2FA, and recovery controls.
+- Persistent GUI theme toggle with dark and light modes.
+- GUI entry details show full stored fields while masking passwords by default.
 - Add, view, edit, and delete entries for logins, URLs, and notes.
 - Search plus quick clipboard copy for entry fields.
 - Auto-refreshes when a new vault file is added to the data folder.
@@ -21,17 +24,18 @@ TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON
 - Optional recovery password to unlock vaults locally if the master password is lost.
 
 ## How it Works
-1. Run `VaultX.ps1` to launch the main menu.
+1. Run `VaultX.ps1` to launch the main menu, or run `VaultX.ps1 -Gui` to open the local GUI directly.
 2. Create or select a vault.
 3. Set or enter the master password to unlock it.
-4. Manage entries (add/view/edit/delete).
+4. Manage entries in the terminal, or switch to the GUI from the main menu and toggle the GUI theme as needed.
 5. Log out to return to the vault list.
 
 ## Files
-- `VaultX.ps1`: main script and UI.
+- `VaultX.ps1`: main script, terminal UI, and local GUI.
 - `Readme.md`: this overview.
 
 ## Notes
 VaultX is designed for local use. If you do not set a recovery password, a lost master password cannot be recovered.
 2FA secrets are stored inside the encrypted vault data and never written in plaintext to disk.
 Exported vaults default to `VaultName_export.json`.
+Vault deletion now uses a direct confirmation prompt in both the terminal UI and the GUI.
