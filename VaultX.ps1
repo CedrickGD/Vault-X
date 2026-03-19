@@ -25,6 +25,8 @@ $script:MenuPromptColor = [ConsoleColor]::Gray
 $script:MenuBannerColor = [ConsoleColor]::Cyan
 $script:MenuPointerSymbol = ">"
 $script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
+$script:ClipboardAutoClearSeconds = 20
+$script:DefaultGeneratedPasswordLength = 20
 $script:DefaultMenuNormalColor = $script:MenuNormalColor
 $script:DefaultMenuPromptColor = $script:MenuPromptColor
 $script:DefaultMenuBannerColor = $script:MenuBannerColor
@@ -92,6 +94,71 @@ function New-RandomBytes {
         $rng.Dispose()
     }
     return $bytes
+}
+
+function Get-SecureRandomInt {
+    param([int]$MaxExclusive)
+    if ($MaxExclusive -le 1) { return 0 }
+    $limit = [uint32]::MaxValue - ([uint32]::MaxValue % [uint32]$MaxExclusive)
+    do {
+        $value = [BitConverter]::ToUInt32((New-RandomBytes 4), 0)
+    } while ($value -ge $limit)
+    return [int]($value % $MaxExclusive)
+}
+
+function Resolve-GeneratedPasswordLength {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $script:DefaultGeneratedPasswordLength }
+    $parsed = 0
+    if (-not [int]::TryParse($Value.Trim(), [ref]$parsed)) { return $null }
+    if ($parsed -lt 8 -or $parsed -gt 128) { return $null }
+    return $parsed
+}
+
+function New-GeneratedPassword {
+    param(
+        [int]$Length = 20,
+        [bool]$IncludeSymbols = $true
+    )
+
+    $lowerChars = [char[]]"abcdefghijkmnopqrstuvwxyz"
+    $upperChars = [char[]]"ABCDEFGHJKLMNPQRSTUVWXYZ"
+    $digitChars = [char[]]"23456789"
+    $symbolChars = [char[]]"!@#$%^&*()-_=+[]{}?"
+
+    $requiredSets = @($lowerChars, $upperChars, $digitChars)
+    if ($IncludeSymbols) {
+        $requiredSets += ,$symbolChars
+    }
+
+    $minimumLength = $requiredSets.Count
+    if ($Length -lt $minimumLength) {
+        $Length = $minimumLength
+    }
+
+    $pool = New-Object System.Collections.Generic.List[char]
+    foreach ($set in $requiredSets) {
+        foreach ($char in $set) {
+            $pool.Add($char) | Out-Null
+        }
+    }
+
+    $result = New-Object System.Collections.Generic.List[char]
+    foreach ($set in $requiredSets) {
+        $result.Add($set[(Get-SecureRandomInt -MaxExclusive $set.Length)]) | Out-Null
+    }
+    while ($result.Count -lt $Length) {
+        $result.Add($pool[(Get-SecureRandomInt -MaxExclusive $pool.Count)]) | Out-Null
+    }
+
+    for ($i = $result.Count - 1; $i -gt 0; $i--) {
+        $swapIndex = Get-SecureRandomInt -MaxExclusive ($i + 1)
+        $temp = $result[$i]
+        $result[$i] = $result[$swapIndex]
+        $result[$swapIndex] = $temp
+    }
+
+    return (-join $result.ToArray())
 }
 
 function Get-AppDir {
@@ -1705,12 +1772,43 @@ function Set-CursorVisible {
     }
 }
 
+function Start-ClipboardAutoClearProcess {
+    param([string]$ExpectedValue)
+    if ([string]::IsNullOrEmpty($ExpectedValue)) { return }
+    if ($script:ClipboardAutoClearSeconds -le 0) { return }
+    if ($null -eq (Get-Command -Name Get-Clipboard -ErrorAction SilentlyContinue)) { return }
+
+    try {
+        $expectedBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ExpectedValue))
+        $command = @"
+Start-Sleep -Seconds $($script:ClipboardAutoClearSeconds)
+try {
+    \$expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$expectedBase64'))
+    \$current = Get-Clipboard -Raw -ErrorAction Stop
+    if (\$current -eq \$expected) {
+        Set-Clipboard -Value '' -ErrorAction Stop
+    }
+} catch {}
+"@
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-WindowStyle", "Hidden",
+            "-EncodedCommand", $encoded
+        ) -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Log ("Clipboard auto-clear scheduling failed: {0}" -f $_.Exception.Message)
+    }
+}
+
 function Set-ClipboardSafe {
     param([string]$Value)
     $cmd = Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue
     if ($null -eq $cmd) { return $false }
     try {
         Set-Clipboard -Value $Value
+        Start-ClipboardAutoClearProcess -ExpectedValue $Value
         return $true
     } catch {
         return $false
@@ -3684,7 +3782,11 @@ function Show-EntryDetail {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
                         } else {
                             if (Set-ClipboardSafe -Value $value) {
-                                Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
+                                if ($script:ClipboardAutoClearSeconds -gt 0) {
+                                    Show-Message ("Copied to clipboard. Clears in {0}s." -f $script:ClipboardAutoClearSeconds) ([ConsoleColor]::Green)
+                                } else {
+                                    Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
+                                }
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
@@ -3717,15 +3819,64 @@ function Read-OptionalText {
 
 function Read-OptionalSecret {
     param([string]$Label, [string]$Current)
-    if ($Current) {
-        $secure = Read-Host "$Label [hidden] (blank keep, '-' clear)" -AsSecureString
-    } else {
-        $secure = Read-Host "$Label (blank skip)" -AsSecureString
+    while ($true) {
+        if ($Current) {
+            $secure = Read-Host "$Label [hidden] (blank keep, /gen generate, '-' clear)" -AsSecureString
+        } else {
+            $secure = Read-Host "$Label (blank skip, /gen generate)" -AsSecureString
+        }
+        $plain = Convert-SecureStringToPlain $secure
+        $secure = $null
+
+        if ([string]::IsNullOrEmpty($plain)) { return $Current }
+        if ($plain -eq "-") { return "" }
+
+        $trimmed = $plain.Trim()
+        if ($trimmed.ToLowerInvariant().StartsWith("/gen")) {
+            $parts = @($trimmed -split "\s+")
+            $length = $script:DefaultGeneratedPasswordLength
+            $includeSymbols = $true
+            $invalid = $false
+
+            for ($i = 1; $i -lt $parts.Count; $i++) {
+                $part = $parts[$i].ToLowerInvariant()
+                $resolvedLength = Resolve-GeneratedPasswordLength -Value $part
+                if ($null -ne $resolvedLength) {
+                    $length = $resolvedLength
+                    continue
+                }
+                if ($part -in @("nosym", "nosymbols", "alnum")) {
+                    $includeSymbols = $false
+                    continue
+                }
+                if ($part -in @("sym", "symbols")) {
+                    $includeSymbols = $true
+                    continue
+                }
+                $invalid = $true
+                break
+            }
+
+            if ($invalid) {
+                Show-Message "Use /gen [length] [nosym]. Example: /gen 24 nosym." ([ConsoleColor]::Yellow)
+                continue
+            }
+
+            $generated = New-GeneratedPassword -Length $length -IncludeSymbols:$includeSymbols
+            if (Set-ClipboardSafe -Value $generated) {
+                if ($script:ClipboardAutoClearSeconds -gt 0) {
+                    Show-Message ("Generated password copied to clipboard. Clears in {0}s." -f $script:ClipboardAutoClearSeconds) ([ConsoleColor]::Green)
+                } else {
+                    Show-Message "Generated password copied to clipboard." ([ConsoleColor]::Green)
+                }
+            } else {
+                Show-Message "Generated password applied to the entry." ([ConsoleColor]::Green)
+            }
+            return $generated
+        }
+
+        return $plain
     }
-    $plain = Convert-SecureStringToPlain $secure
-    if ([string]::IsNullOrEmpty($plain)) { return $Current }
-    if ($plain -eq "-") { return "" }
-    return $plain
 }
 
 function Read-Entry {
@@ -4582,7 +4733,7 @@ function Show-GuiEntryEditor {
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.ShowInTaskbar = $false
-    $form.ClientSize = New-Object System.Drawing.Size(660, 600)
+    $form.ClientSize = New-Object System.Drawing.Size(660, 640)
 
     $fieldConfigs = @(
         @{ Name = "Title"; Label = "Name"; Multiline = $false; Password = $false }
@@ -4597,6 +4748,9 @@ function Show-GuiEntryEditor {
 
     $inputs = @{}
     $y = 16
+    $passwordShowCheck = $null
+    $passwordLengthInput = $null
+    $passwordSymbolsCheck = $null
     foreach ($config in $fieldConfigs) {
         $label = New-Object System.Windows.Forms.Label
         $label.Text = $config.Label
@@ -4624,35 +4778,74 @@ function Show-GuiEntryEditor {
         $form.Controls.Add($inputBox)
 
         if ($config.Password) {
-            $showCheck = New-Object System.Windows.Forms.CheckBox
-            $showCheck.Text = "Show password"
-            $showCheck.SetBounds(526, $y - 1, 118, 18)
-            $showCheck.Add_CheckedChanged({
-                $inputs["Password"].UseSystemPasswordChar = (-not $showCheck.Checked)
+            $passwordShowCheck = New-Object System.Windows.Forms.CheckBox
+            $passwordShowCheck.Text = "Show password"
+            $passwordShowCheck.SetBounds(16, $y + 50, 120, 22)
+            $passwordShowCheck.Add_CheckedChanged({
+                $inputs["Password"].UseSystemPasswordChar = (-not $passwordShowCheck.Checked)
             })
             if ($ReadOnly) {
-                $showCheck.TabStop = $false
+                $passwordShowCheck.TabStop = $false
             }
-            $form.Controls.Add($showCheck)
+            $form.Controls.Add($passwordShowCheck)
+
+            if (-not $ReadOnly) {
+                $lengthLabel = New-Object System.Windows.Forms.Label
+                $lengthLabel.Text = "Length"
+                $lengthLabel.SetBounds(172, $y + 52, 50, 18)
+                $form.Controls.Add($lengthLabel)
+
+                $passwordLengthInput = New-Object System.Windows.Forms.TextBox
+                $passwordLengthInput.Text = [string]$script:DefaultGeneratedPasswordLength
+                $passwordLengthInput.SetBounds(224, $y + 48, 44, 24)
+                $form.Controls.Add($passwordLengthInput)
+
+                $passwordSymbolsCheck = New-Object System.Windows.Forms.CheckBox
+                $passwordSymbolsCheck.Text = "Symbols"
+                $passwordSymbolsCheck.Checked = $true
+                $passwordSymbolsCheck.SetBounds(278, $y + 50, 78, 22)
+                $form.Controls.Add($passwordSymbolsCheck)
+
+                $generateButton = New-Object System.Windows.Forms.Button
+                $generateButton.Text = "Generate"
+                $generateButton.SetBounds(544, $y + 46, 100, 30)
+                $generateButton.Add_Click({
+                    $length = Resolve-GeneratedPasswordLength -Value $passwordLengthInput.Text
+                    if ($null -eq $length) {
+                        Show-GuiMessage -Text "Password length must be between 8 and 128." -Title $form.Text -Kind Warning -Owner $form
+                        return
+                    }
+                    $generated = New-GeneratedPassword -Length $length -IncludeSymbols:$passwordSymbolsCheck.Checked
+                    $inputs["Password"].Text = $generated
+                    if (-not (Set-ClipboardSafe -Value $generated)) {
+                        Write-Log "GUI password generator could not copy to clipboard."
+                    }
+                    if ($null -ne $passwordShowCheck) {
+                        $inputs["Password"].UseSystemPasswordChar = (-not $passwordShowCheck.Checked)
+                    }
+                    $inputs["Password"].Focus()
+                })
+                $form.Controls.Add($generateButton)
+            }
         }
 
-        $y += if ($config.Multiline) { 104 } else { 52 }
+        $y += if ($config.Multiline) { 104 } elseif ($config.Password) { 84 } else { 52 }
     }
 
     if ($ReadOnly) {
         $updatedLabel = New-Object System.Windows.Forms.Label
         $updatedLabel.Text = "Updated"
-        $updatedLabel.SetBounds(16, 556, 120, 18)
+        $updatedLabel.SetBounds(16, 596, 120, 18)
         $form.Controls.Add($updatedLabel)
 
         $updatedValue = New-Object System.Windows.Forms.Label
         $updatedValue.Text = if ($null -ne $Existing -and -not [string]::IsNullOrWhiteSpace([string]$Existing.UpdatedAt)) { [string]$Existing.UpdatedAt } else { "(unknown)" }
-        $updatedValue.SetBounds(16, 574, 360, 18)
+        $updatedValue.SetBounds(16, 614, 360, 18)
         $form.Controls.Add($updatedValue)
 
         $closeButton = New-Object System.Windows.Forms.Button
         $closeButton.Text = "Close"
-        $closeButton.SetBounds(562, 556, 82, 30)
+        $closeButton.SetBounds(562, 596, 82, 30)
         $closeButton.Add_Click({
             $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
             $form.Close()
@@ -4661,10 +4854,11 @@ function Show-GuiEntryEditor {
 
         $form.AcceptButton = $closeButton
         $form.CancelButton = $closeButton
+        $form.Add_Shown({ $closeButton.Focus() })
     } else {
         $okButton = New-Object System.Windows.Forms.Button
         $okButton.Text = if ($null -ne $Existing) { "Save" } else { "Add" }
-        $okButton.SetBounds(468, 556, 82, 30)
+        $okButton.SetBounds(468, 596, 82, 30)
         $okButton.Add_Click({
             $title = $inputs["Title"].Text.Trim()
             if ([string]::IsNullOrWhiteSpace($title)) {
@@ -4689,7 +4883,7 @@ function Show-GuiEntryEditor {
 
         $cancelButton = New-Object System.Windows.Forms.Button
         $cancelButton.Text = "Cancel"
-        $cancelButton.SetBounds(562, 556, 82, 30)
+        $cancelButton.SetBounds(562, 596, 82, 30)
         $cancelButton.Add_Click({
             $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
             $form.Close()

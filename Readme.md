@@ -11,7 +11,9 @@ TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON
 - Persistent GUI theme toggle with dark and light modes.
 - GUI entry details open on demand and show full stored fields while masking passwords by default.
 - Add, view, edit, and delete entries for logins, URLs, and notes.
+- Built-in password generator in the entry editor plus `/gen` shortcut support in terminal prompts.
 - Search plus quick clipboard copy for entry fields.
+- Clipboard copies auto-clear after a short delay when unchanged.
 - Auto-refreshes when a new vault file is added to the data folder.
 - Offline 2FA (TOTP) compatible with Google Authenticator / Authy / Ente.
 - Optional 24h trusted device token after successful 2FA.
