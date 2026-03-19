@@ -4570,12 +4570,13 @@ function Open-WebUrlGui {
 function Show-GuiEntryEditor {
     param(
         $Existing,
+        [switch]$ReadOnly,
         [object]$Owner
     )
     if (-not (Initialize-GuiFramework)) { return $null }
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = if ($null -ne $Existing) { "Edit Entry" } else { "Add Entry" }
+    $form.Text = if ($ReadOnly) { "View Entry" } elseif ($null -ne $Existing) { "Edit Entry" } else { "Add Entry" }
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
     $form.MaximizeBox = $false
@@ -4609,6 +4610,10 @@ function Show-GuiEntryEditor {
             $inputBox.Multiline = $true
             $inputBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
         }
+        if ($ReadOnly) {
+            $inputBox.ReadOnly = $true
+            $inputBox.TabStop = $false
+        }
         if ($config.Password) {
             $inputBox.UseSystemPasswordChar = $true
         }
@@ -4625,53 +4630,81 @@ function Show-GuiEntryEditor {
             $showCheck.Add_CheckedChanged({
                 $inputs["Password"].UseSystemPasswordChar = (-not $showCheck.Checked)
             })
+            if ($ReadOnly) {
+                $showCheck.TabStop = $false
+            }
             $form.Controls.Add($showCheck)
         }
 
         $y += if ($config.Multiline) { 104 } else { 52 }
     }
 
-    $okButton = New-Object System.Windows.Forms.Button
-    $okButton.Text = if ($null -ne $Existing) { "Save" } else { "Add" }
-    $okButton.SetBounds(468, 556, 82, 30)
-    $okButton.Add_Click({
-        $title = $inputs["Title"].Text.Trim()
-        if ([string]::IsNullOrWhiteSpace($title)) {
-            Show-GuiMessage -Text "Entry name is required." -Title $form.Text -Kind Warning -Owner $form
-            return
-        }
-        $values = [ordered]@{
-            Title = $title
-            Url = $inputs["Url"].Text.Trim()
-            Username = $inputs["Username"].Text.Trim()
-            Password = $inputs["Password"].Text
-            Phone = $inputs["Phone"].Text.Trim()
-            Email = $inputs["Email"].Text.Trim()
-            Notes = $inputs["Notes"].Text.Trim()
-            Other = $inputs["Other"].Text.Trim()
-        }
-        $form.Tag = $values
-        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $form.Close()
-    })
-    $form.Controls.Add($okButton)
+    if ($ReadOnly) {
+        $updatedLabel = New-Object System.Windows.Forms.Label
+        $updatedLabel.Text = "Updated"
+        $updatedLabel.SetBounds(16, 556, 120, 18)
+        $form.Controls.Add($updatedLabel)
 
-    $cancelButton = New-Object System.Windows.Forms.Button
-    $cancelButton.Text = "Cancel"
-    $cancelButton.SetBounds(562, 556, 82, 30)
-    $cancelButton.Add_Click({
-        $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-        $form.Close()
-    })
-    $form.Controls.Add($cancelButton)
+        $updatedValue = New-Object System.Windows.Forms.Label
+        $updatedValue.Text = if ($null -ne $Existing -and -not [string]::IsNullOrWhiteSpace([string]$Existing.UpdatedAt)) { [string]$Existing.UpdatedAt } else { "(unknown)" }
+        $updatedValue.SetBounds(16, 574, 360, 18)
+        $form.Controls.Add($updatedValue)
 
-    $form.AcceptButton = $okButton
-    $form.CancelButton = $cancelButton
-    $form.Add_Shown({ $inputs["Title"].Focus() })
+        $closeButton = New-Object System.Windows.Forms.Button
+        $closeButton.Text = "Close"
+        $closeButton.SetBounds(562, 556, 82, 30)
+        $closeButton.Add_Click({
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $form.Close()
+        })
+        $form.Controls.Add($closeButton)
+
+        $form.AcceptButton = $closeButton
+        $form.CancelButton = $closeButton
+    } else {
+        $okButton = New-Object System.Windows.Forms.Button
+        $okButton.Text = if ($null -ne $Existing) { "Save" } else { "Add" }
+        $okButton.SetBounds(468, 556, 82, 30)
+        $okButton.Add_Click({
+            $title = $inputs["Title"].Text.Trim()
+            if ([string]::IsNullOrWhiteSpace($title)) {
+                Show-GuiMessage -Text "Entry name is required." -Title $form.Text -Kind Warning -Owner $form
+                return
+            }
+            $values = [ordered]@{
+                Title = $title
+                Url = $inputs["Url"].Text.Trim()
+                Username = $inputs["Username"].Text.Trim()
+                Password = $inputs["Password"].Text
+                Phone = $inputs["Phone"].Text.Trim()
+                Email = $inputs["Email"].Text.Trim()
+                Notes = $inputs["Notes"].Text.Trim()
+                Other = $inputs["Other"].Text.Trim()
+            }
+            $form.Tag = $values
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $form.Close()
+        })
+        $form.Controls.Add($okButton)
+
+        $cancelButton = New-Object System.Windows.Forms.Button
+        $cancelButton.Text = "Cancel"
+        $cancelButton.SetBounds(562, 556, 82, 30)
+        $cancelButton.Add_Click({
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+            $form.Close()
+        })
+        $form.Controls.Add($cancelButton)
+
+        $form.AcceptButton = $okButton
+        $form.CancelButton = $cancelButton
+        $form.Add_Shown({ $inputs["Title"].Focus() })
+    }
     Set-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
 
     $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
     if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+    if ($ReadOnly) { return $Existing }
 
     $values = $form.Tag
     if ($null -ne $Existing) {
@@ -5295,7 +5328,7 @@ function Show-VaultGui {
     $form.Controls.Add($themeButton)
 
     $grid = New-Object System.Windows.Forms.DataGridView
-    $grid.SetBounds(16, 50, 760, 350)
+    $grid.SetBounds(16, 50, 760, 544)
     $grid.AutoGenerateColumns = $false
     $grid.ReadOnly = $true
     $grid.AllowUserToAddRows = $false
@@ -5325,30 +5358,19 @@ function Show-VaultGui {
         [void]$grid.Columns.Add($column)
     }
 
-    $detailsGroup = New-Object System.Windows.Forms.GroupBox
-    $detailsGroup.Text = "Selected Entry"
-    $detailsGroup.SetBounds(16, 414, 1003, 180)
-    $form.Controls.Add($detailsGroup)
-
-    $detailsBox = New-Object System.Windows.Forms.TextBox
-    $detailsBox.Multiline = $true
-    $detailsBox.ReadOnly = $true
-    $detailsBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
-    $detailsBox.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $detailsGroup.Controls.Add($detailsBox)
-
     $buttonSpecs = @(
         @{ Name = "add"; Label = "Add Entry"; Top = 50 }
-        @{ Name = "edit"; Label = "Edit Entry"; Top = 86 }
-        @{ Name = "delete"; Label = "Delete Entry"; Top = 122 }
-        @{ Name = "copy-user"; Label = "Copy Username"; Top = 158 }
-        @{ Name = "copy-pass"; Label = "Copy Password"; Top = 194 }
-        @{ Name = "open-url"; Label = "Open URL"; Top = 230 }
-        @{ Name = "import-csv"; Label = "Import CSV"; Top = 266 }
-        @{ Name = "export"; Label = "Export Vault"; Top = 302 }
-        @{ Name = "twofactor"; Label = "2FA Settings"; Top = 338 }
-        @{ Name = "recovery"; Label = "Recovery"; Top = 374 }
-        @{ Name = "lock"; Label = "Lock Vault"; Top = 410 }
+        @{ Name = "view"; Label = "View Entry"; Top = 86 }
+        @{ Name = "edit"; Label = "Edit Entry"; Top = 122 }
+        @{ Name = "delete"; Label = "Delete Entry"; Top = 158 }
+        @{ Name = "copy-user"; Label = "Copy Username"; Top = 194 }
+        @{ Name = "copy-pass"; Label = "Copy Password"; Top = 230 }
+        @{ Name = "open-url"; Label = "Open URL"; Top = 266 }
+        @{ Name = "import-csv"; Label = "Import CSV"; Top = 302 }
+        @{ Name = "export"; Label = "Export Vault"; Top = 338 }
+        @{ Name = "twofactor"; Label = "2FA Settings"; Top = 374 }
+        @{ Name = "recovery"; Label = "Recovery"; Top = 410 }
+        @{ Name = "lock"; Label = "Lock Vault"; Top = 446 }
     )
     $buttons = @{}
     foreach ($buttonSpec in $buttonSpecs) {
@@ -5375,33 +5397,6 @@ function Show-VaultGui {
             }
         }
         return $null
-    }
-
-    $refreshDetails = {
-        $entry = & $getSelectedEntry
-        if ($null -eq $entry) {
-            $detailsBox.Text = "Select an entry to inspect its fields."
-            return
-        }
-        $fields = @(
-            @{ Label = "Name"; Value = $entry.Title }
-            @{ Label = "URL"; Value = $entry.Url }
-            @{ Label = "Username"; Value = $entry.Username }
-            @{ Label = "Password"; Value = if ([string]::IsNullOrWhiteSpace($entry.Password)) { "" } else { "(hidden - use Copy Password)" } }
-            @{ Label = "Phone"; Value = $entry.Phone }
-            @{ Label = "Email"; Value = $entry.Email }
-            @{ Label = "Notes"; Value = $entry.Notes }
-            @{ Label = "Other"; Value = $entry.Other }
-            @{ Label = "Updated"; Value = $entry.UpdatedAt }
-        )
-        $lines = New-Object System.Collections.Generic.List[string]
-        foreach ($field in $fields) {
-            $value = if ([string]::IsNullOrWhiteSpace([string]$field.Value)) { "(empty)" } else { [string]$field.Value }
-            $lines.Add($field.Label) | Out-Null
-            $lines.Add($value) | Out-Null
-            $lines.Add("") | Out-Null
-        }
-        $detailsBox.Text = (($lines.ToArray()) -join [Environment]::NewLine).TrimEnd()
     }
 
     $refreshGrid = {
@@ -5448,7 +5443,6 @@ function Show-VaultGui {
             $grid.ClearSelection()
             $state.SelectedEntryId = $null
         }
-        & $refreshDetails
     }
 
     $applyTheme = {
@@ -5464,11 +5458,10 @@ function Show-VaultGui {
         } else {
             $state.SelectedEntryId = $null
         }
-        & $refreshDetails
     })
     $grid.Add_CellDoubleClick({
         if ($null -ne (& $getSelectedEntry)) {
-            $buttons["edit"].PerformClick()
+            $buttons["view"].PerformClick()
         }
     })
     $searchBox.Add_TextChanged({ & $refreshGrid })
@@ -5490,6 +5483,15 @@ function Show-VaultGui {
             Write-Log ("GUI add entry failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to add the entry." -Title $title -Kind Error -Owner $form
         }
+    })
+
+    $buttons["view"].Add_Click({
+        $entry = & $getSelectedEntry
+        if ($null -eq $entry) {
+            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            return
+        }
+        [void](Show-GuiEntryEditor -Existing $entry -ReadOnly -Owner $form)
     })
 
     $buttons["edit"].Add_Click({

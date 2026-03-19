@@ -9,7 +9,7 @@ TL;DR: A local, single-user password manager built in PowerShell. Encrypted JSON
 - Menu-driven UI with fast navigation and a reliable back option.
 - Optional local Windows GUI mode with vault browser, entry editor, CSV import, export, 2FA, and recovery controls.
 - Persistent GUI theme toggle with dark and light modes.
-- GUI entry details show full stored fields while masking passwords by default.
+- GUI entry details open on demand and show full stored fields while masking passwords by default.
 - Add, view, edit, and delete entries for logins, URLs, and notes.
 - Search plus quick clipboard copy for entry fields.
 - Auto-refreshes when a new vault file is added to the data folder.
