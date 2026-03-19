@@ -55,6 +55,17 @@ function Convert-SecureStringToPlain {
     }
 }
 
+function ConvertTo-VaultSecureString {
+    param([string]$Value)
+    if ($null -eq $Value) { return $null }
+    $secure = New-Object Security.SecureString
+    foreach ($character in $Value.ToCharArray()) {
+        $secure.AppendChar($character)
+    }
+    $secure.MakeReadOnly()
+    return $secure
+}
+
 function Read-SecurePlain {
     param([string]$Prompt)
     $secure = Read-Host $Prompt -AsSecureString
@@ -222,7 +233,7 @@ function ConvertTo-VersionString {
     return $clean
 }
 
-function Normalize-VersionString {
+function ConvertTo-NormalizedVersionString {
     param([string]$Value)
     $clean = ConvertTo-VersionString -Value $Value
     if ([string]::IsNullOrWhiteSpace($clean)) { return $null }
@@ -279,8 +290,8 @@ function Test-UpdateDownloadUrl {
 
 function Compare-VersionString {
     param([string]$Current, [string]$Latest)
-    $currentClean = Normalize-VersionString -Value $Current
-    $latestClean = Normalize-VersionString -Value $Latest
+    $currentClean = ConvertTo-NormalizedVersionString -Value $Current
+    $latestClean = ConvertTo-NormalizedVersionString -Value $Latest
     if ([string]::IsNullOrWhiteSpace($currentClean) -or [string]::IsNullOrWhiteSpace($latestClean)) {
         return 0
     }
@@ -572,7 +583,7 @@ function Remove-BrokenVaultFiles {
     return $removed
 }
 
-function Wipe-VaultCache {
+function Clear-VaultCache {
     param([switch]$Force, [switch]$Silent)
     $dir = Get-AppDir
     if ([string]::IsNullOrWhiteSpace($dir)) {
@@ -1007,8 +1018,8 @@ function Confirm-AccountPassword {
             if ($recoveryAvailable) {
                 $choice = Show-ActionMenu -Title "Password check failed" -Options @("Retry", "Recovery", "Abort") -Subtitle "A recovery password is configured for this vault."
                 if ($choice -eq "Recovery") {
-                    $recoveryPassword = Read-SecurePlain "Recovery password (Enter to abort)"
-                    if ([string]::IsNullOrEmpty($recoveryPassword)) { return $false }
+                    $recoveryPassword = Read-Host "Recovery password (Enter to abort)" -AsSecureString
+                    if ($null -eq $recoveryPassword -or $recoveryPassword.Length -eq 0) { return $false }
                     $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
                     $recoveryPassword = $null
                     if ($null -eq $recoveryMaterial) {
@@ -1181,7 +1192,7 @@ function Remove-VaultMetaValue {
     $Meta.PSObject.Properties.Remove($Name)
 }
 
-function Ensure-VaultId {
+function Initialize-VaultId {
     param($Meta)
     $current = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
     if ([string]::IsNullOrWhiteSpace($current)) {
@@ -1327,7 +1338,7 @@ function Save-Vault {
     $encrypted = Protect-Bytes -PlainBytes $plainBytes -Key $Key
     Set-VaultMetaValue -Meta $Meta -Name "IV" -Value $encrypted.IV
     Set-VaultMetaValue -Meta $Meta -Name "Data" -Value $encrypted.Data
-    $null = Ensure-VaultId -Meta $Meta
+    $null = Initialize-VaultId -Meta $Meta
     $macReady = ($null -ne $MacKey -and $MacKey.Length -eq 32)
     if ($macReady) {
         $ivBytes = [Convert]::FromBase64String($encrypted.IV)
@@ -1505,7 +1516,7 @@ function Show-Message {
     Start-Sleep -Milliseconds 900
 }
 
-function Render-MenuFrame {
+function Write-MenuFrame {
     if (-not $script:FrameBufferActive) { return }
     try {
         $width = [Math]::Max(1, (Get-ConsoleWidth))
@@ -1569,7 +1580,7 @@ function Add-MenuFrameLine {
 }
 
 function Read-MenuKey {
-    Render-MenuFrame
+    Write-MenuFrame
     $raw = $null
     try {
         $raw = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
@@ -1641,7 +1652,7 @@ function Read-MenuKeyWithRefresh {
         [int]$ChangePollMs = 100,
         [scriptblock]$OnChange
     )
-    Render-MenuFrame
+    Write-MenuFrame
     $hasRefresh = ($RefreshIntervalMs -gt 0 -and $null -ne $OnRefresh)
     $hasChange = ($null -ne $Watcher -and $null -ne $OnChange)
     if (-not $hasRefresh -and -not $hasChange) { return Read-MenuKey }
@@ -2087,7 +2098,7 @@ function Set-GuiThemeMode {
     return $script:GuiTheme
 }
 
-function Toggle-GuiThemeMode {
+function Switch-GuiThemeMode {
     $current = Get-GuiThemeMode
     if ($current -eq "dark") {
         return (Set-GuiThemeMode -Theme "light")
@@ -2481,19 +2492,24 @@ function Test-RecoveryMeta {
 function Get-MasterKeyFromRecovery {
     param(
         $Meta,
-        [string]$RecoveryPassword
+        [Security.SecureString]$RecoveryPassword
     )
     if (-not (Test-RecoveryMeta -Meta $Meta)) { return $null }
+    if ($null -eq $RecoveryPassword -or $RecoveryPassword.Length -eq 0) { return $null }
     try {
+        $recoveryPasswordPlain = Convert-SecureStringToPlain $RecoveryPassword
+        if ([string]::IsNullOrEmpty($recoveryPasswordPlain)) { return $null }
         $salt = [Convert]::FromBase64String($Meta.RecoverySalt)
         $iterations = [int]$Meta.RecoveryIterations
-        $recoveryKey = Get-KeyFromPassword -Password $RecoveryPassword -Salt $salt -Iterations $iterations
+        $recoveryKey = Get-KeyFromPassword -Password $recoveryPasswordPlain -Salt $salt -Iterations $iterations
         $iv = [Convert]::FromBase64String($Meta.RecoveryKeyIV)
         $cipher = [Convert]::FromBase64String($Meta.RecoveryKeyData)
         $masterKey = Unprotect-Bytes -CipherBytes $cipher -Key $recoveryKey -IV $iv
         return $masterKey
     } catch {
         return $null
+    } finally {
+        $recoveryPasswordPlain = $null
     }
 }
 
@@ -2600,8 +2616,8 @@ function Open-Vault {
             if ($recoveryAvailable) {
                 $choice = Show-ActionMenu -Title "Unlock failed" -Options @("Retry", "Recovery", "Abort") -Subtitle "A recovery password is configured for this vault."
                 if ($choice -eq "Recovery") {
-                    $recoveryPassword = Read-SecurePlain "Recovery password (Enter to abort)"
-                    if ([string]::IsNullOrEmpty($recoveryPassword)) { return $null }
+                    $recoveryPassword = Read-Host "Recovery password (Enter to abort)" -AsSecureString
+                    if ($null -eq $recoveryPassword -or $recoveryPassword.Length -eq 0) { return $null }
                     $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
                     $recoveryPassword = $null
                     if ($null -eq $recoveryMaterial) {
@@ -2996,7 +3012,7 @@ function Confirm-VaultTwoFactor {
     $needsSave = $false
     $vaultId = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
     if ([string]::IsNullOrWhiteSpace($vaultId)) {
-        $vaultId = Ensure-VaultId -Meta $Meta
+        $vaultId = Initialize-VaultId -Meta $Meta
         $needsSave = $true
     }
     if (-not $IgnoreTrust) {
@@ -3092,8 +3108,8 @@ function Invoke-TwoFactorSettings {
                 Show-Message "Invalid 2FA code." ([ConsoleColor]::Red)
                 continue
             }
-            Set-VaultTotpSecret -VaultData $Data -Secret $newSecret
-            $vaultId = Ensure-VaultId -Meta $Meta
+        Set-VaultTotpSecret -VaultData $Data -Secret $newSecret
+        $vaultId = Initialize-VaultId -Meta $Meta
             Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
             $expires = [DateTime]::UtcNow.AddHours(24)
             Save-TrustToken -VaultId $vaultId -Secret $newSecret -ExpiresTicks $expires.Ticks | Out-Null
@@ -3495,12 +3511,14 @@ function Show-AccountMenu {
         [int]$Selected = 0,
         [string]$StartSection = "main"
     )
-    $accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
-    $selectedAction = [Math]::Max(0, $Selected)
+    $menuState = [ordered]@{
+        Accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
+        SelectedAction = [Math]::Max(0, $Selected)
+        VaultStamp = Get-VaultFilesStamp
+    }
     $section = if ([string]::IsNullOrWhiteSpace($StartSection)) { "main" } else { $StartSection }
     $cursorState = Get-CursorVisible
     $watcher = New-VaultFolderWatcher
-    $vaultStamp = Get-VaultFilesStamp
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
         $isFirstRender = $true
@@ -3514,8 +3532,8 @@ function Show-AccountMenu {
                         $section = "main"
                         continue
                     }
-                    if ($choice -eq "Customize") { return @{ Action = "customize"; Section = "settings"; Selected = 0; Accounts = $accounts } }
-                    if ($choice -eq "Clear cache") { return @{ Action = "wipe-cache"; Section = "settings"; Selected = 0; Accounts = $accounts } }
+                    if ($choice -eq "Customize") { return @{ Action = "customize"; Section = "settings"; Selected = 0; Accounts = $menuState.Accounts } }
+                    if ($choice -eq "Clear cache") { return @{ Action = "wipe-cache"; Section = "settings"; Selected = 0; Accounts = $menuState.Accounts } }
                 }
                 "manage" {
                     $manageOptions = @("Remove Vault", "Back")
@@ -3525,39 +3543,39 @@ function Show-AccountMenu {
                         $section = "main"
                         continue
                     }
-                    if ($choice -eq "Remove Vault") { return @{ Action = "delete"; Section = "manage"; Selected = 0; Accounts = $accounts } }
+                    if ($choice -eq "Remove Vault") { return @{ Action = "delete"; Section = "manage"; Selected = 0; Accounts = $menuState.Accounts } }
                 }
                 default {
                     $actions = @()
-                    if ($accounts.Count -gt 0) {
+                    if ($menuState.Accounts.Count -gt 0) {
                         $actions += @{ Label = "Open Existing"; Action = "login" }
                     }
                     $actions += @{ Label = "Create New"; Action = "add" }
                     $actions += @{ Label = "Import Data"; Action = "import" }
-                    if ($accounts.Count -gt 0) {
+                    if ($menuState.Accounts.Count -gt 0) {
                         $actions += @{ Label = "Manage Vaults"; Action = "manage" }
                     }
                     $actions += @{ Label = "Switch to GUI"; Action = "gui" }
                     $actions += @{ Label = "Script Settings"; Action = "settings" }
                     $actions += @{ Label = "Exit App"; Action = "quit" }
 
-                    if ($selectedAction -ge $actions.Count) {
-                        $selectedAction = [Math]::Max(0, $actions.Count - 1)
+                    if ($menuState.SelectedAction -ge $actions.Count) {
+                        $menuState.SelectedAction = [Math]::Max(0, $actions.Count - 1)
                     }
 
                     Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
                     Write-Header "Main Menu" -ShowBanner
-                    if ($accounts.Count -eq 0) {
+                    if ($menuState.Accounts.Count -eq 0) {
                         Write-MenuTextLine -Text "No vaults yet." -Color DarkGray
                     } else {
-                        $names = $accounts | ForEach-Object { $_.Name } | Sort-Object
+                        $names = $menuState.Accounts | ForEach-Object { $_.Name } | Sort-Object
                         Write-MenuTextLine -Text ("Vaults: " + ($names -join ", ")) -Color DarkGray
                     }
                     Write-MenuTextLine -Text ""
                     Write-MenuRule -Char '='
                     for ($i = 0; $i -lt $actions.Count; $i++) {
                         $action = $actions[$i]
-                        $isSelected = ($i -eq $selectedAction)
+                        $isSelected = ($i -eq $menuState.SelectedAction)
                         $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
                         Write-MenuItem -Text (Format-MenuLabel -Label $action.Label -IsSelected $isSelected) -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
                     }
@@ -3565,40 +3583,40 @@ function Show-AccountMenu {
                     Write-MenuTextLine -Text "Up/Down move, Enter select, Esc quit." -Color DarkGray
                     $key = Read-MenuKeyWithRefresh -RefreshIntervalMs 700 -OnRefresh {
                         $currentStamp = Get-VaultFilesStamp
-                        if ($currentStamp -ne $vaultStamp) {
-                            $vaultStamp = $currentStamp
-                            Wipe-VaultCache -Force -Silent | Out-Null
-                            $accounts = Sync-AccountsWithVaultFiles -Accounts @()
-                            $selectedAction = 0
+                        if ($currentStamp -ne $menuState.VaultStamp) {
+                            $menuState.VaultStamp = $currentStamp
+                            Clear-VaultCache -Force -Silent | Out-Null
+                            $menuState.Accounts = Sync-AccountsWithVaultFiles -Accounts @()
+                            $menuState.SelectedAction = 0
                             return $true
                         }
                         return $false
                     } -Watcher $watcher -ChangePollMs 100 -OnChange {
-                        Wipe-VaultCache -Force -Silent | Out-Null
-                        $accounts = Sync-AccountsWithVaultFiles -Accounts @()
-                        $vaultStamp = Get-VaultFilesStamp
-                        $selectedAction = 0
+                        Clear-VaultCache -Force -Silent | Out-Null
+                        $menuState.Accounts = Sync-AccountsWithVaultFiles -Accounts @()
+                        $menuState.VaultStamp = Get-VaultFilesStamp
+                        $menuState.SelectedAction = 0
                         return $true
                     }
                     if ($null -eq $key) { continue }
                     switch ($key.Key) {
                         "UpArrow" {
-                            if ($selectedAction -gt 0) { $selectedAction-- } else { $selectedAction = $actions.Count - 1 }
+                            if ($menuState.SelectedAction -gt 0) { $menuState.SelectedAction-- } else { $menuState.SelectedAction = $actions.Count - 1 }
                         }
                         "DownArrow" {
-                            if ($selectedAction -lt ($actions.Count - 1)) { $selectedAction++ } else { $selectedAction = 0 }
+                            if ($menuState.SelectedAction -lt ($actions.Count - 1)) { $menuState.SelectedAction++ } else { $menuState.SelectedAction = 0 }
                         }
                         "Enter" {
-                            $action = $actions[$selectedAction].Action
+                            $action = $actions[$menuState.SelectedAction].Action
                             if ($action -eq "settings" -or $action -eq "manage") {
                                 $section = $action
                                 $isFirstRender = $true
                                 continue
                             }
-                            return @{ Action = $action; Section = "main"; Selected = 0; Accounts = $accounts }
+                            return @{ Action = $action; Section = "main"; Selected = 0; Accounts = $menuState.Accounts }
                         }
                         "Escape" {
-                            return @{ Action = "quit"; Section = "main"; Selected = 0; Accounts = $accounts }
+                            return @{ Action = "quit"; Section = "main"; Selected = 0; Accounts = $menuState.Accounts }
                         }
                     }
                 }
@@ -4034,7 +4052,7 @@ function Get-GuiThemePalette {
     }
 }
 
-function Apply-GuiTheme {
+function Set-GuiTheme {
     param(
         [object]$Control,
         [string]$Theme
@@ -4098,7 +4116,7 @@ function Apply-GuiTheme {
 
     if ($Control.PSObject.Properties.Name -contains "Controls") {
         foreach ($child in $Control.Controls) {
-            Apply-GuiTheme -Control $child -Theme $palette.Mode
+            Set-GuiTheme -Control $child -Theme $palette.Mode
         }
     }
 }
@@ -4208,7 +4226,7 @@ function Show-GuiChoiceDialog {
     if ($null -ne $cancelButton) {
         $form.CancelButton = $cancelButton
     }
-    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+    Set-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
 
     $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -4287,7 +4305,7 @@ function Show-GuiPromptDialog {
     $form.AcceptButton = $okButton
     $form.CancelButton = $cancelButton
     $form.Add_Shown({ $inputBox.Focus(); $inputBox.SelectAll() })
-    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+    Set-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
 
     $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -4374,7 +4392,7 @@ function Read-GuiConfirmedSecret {
     $form.AcceptButton = $okButton
     $form.CancelButton = $cancelButton
     $form.Add_Shown({ $box1.Focus() })
-    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+    Set-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
 
     $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -4435,7 +4453,7 @@ function Show-GuiReadOnlyTextDialog {
     $form.Controls.Add($closeButton)
 
     $form.CancelButton = $closeButton
-    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+    Set-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
     if ($null -ne $Owner) {
         [void]$form.ShowDialog($Owner)
     } else {
@@ -4523,7 +4541,7 @@ function Show-GuiTotpSetupDialog {
     $form.AcceptButton = $okButton
     $form.CancelButton = $cancelButton
     $form.Add_Shown({ $codeBox.Focus() })
-    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+    Set-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
 
     $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -4650,7 +4668,7 @@ function Show-GuiEntryEditor {
     $form.AcceptButton = $okButton
     $form.CancelButton = $cancelButton
     $form.Add_Shown({ $inputs["Title"].Focus() })
-    Apply-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
+    Set-GuiTheme -Control $form -Theme (Get-GuiThemeMode)
 
     $result = if ($null -ne $Owner) { $form.ShowDialog($Owner) } else { $form.ShowDialog() }
     if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
@@ -4700,7 +4718,7 @@ function Confirm-VaultTwoFactorGui {
     $needsSave = $false
     $vaultId = Get-VaultMetaValue -Meta $Meta -Name "VaultId"
     if ([string]::IsNullOrWhiteSpace($vaultId)) {
-        $vaultId = Ensure-VaultId -Meta $Meta
+        $vaultId = Initialize-VaultId -Meta $Meta
         $needsSave = $true
     }
 
@@ -4832,8 +4850,10 @@ function Open-VaultGui {
         } else {
             $recoveryPassword = Show-GuiPromptDialog -Title "Recovery password" -Prompt "Enter recovery password" -IsPassword -OkText "Unlock" -Owner $Owner
             if ([string]::IsNullOrEmpty($recoveryPassword)) { return $null }
-            $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
+            $recoveryPasswordSecure = ConvertTo-VaultSecureString -Value $recoveryPassword
             $recoveryPassword = $null
+            $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPasswordSecure
+            $recoveryPasswordSecure = $null
             if ($null -eq $recoveryMaterial) {
                 Show-GuiMessage -Text "Invalid recovery password or vault corrupted." -Title "Recovery Unlock" -Kind Error -Owner $Owner
                 $choice = Show-GuiChoiceDialog -Title "Recovery failed" -Message "Recovery unlock did not succeed." -Options @("Retry Recovery", "Back") -Owner $Owner
@@ -5220,8 +5240,8 @@ function Show-GuiTwoFactorSettings {
             continue
         }
 
-        Set-VaultTotpSecret -VaultData $Data -Secret $newSecret
-        $vaultId = Ensure-VaultId -Meta $Meta
+            Set-VaultTotpSecret -VaultData $Data -Secret $newSecret
+            $vaultId = Initialize-VaultId -Meta $Meta
         Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
         $expires = [DateTime]::UtcNow.AddHours(24)
         Save-TrustToken -VaultId $vaultId -Secret $newSecret -ExpiresTicks $expires.Ticks | Out-Null
@@ -5434,7 +5454,7 @@ function Show-VaultGui {
     $applyTheme = {
         $theme = Get-GuiThemeMode
         $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
-        Apply-GuiTheme -Control $form -Theme $theme
+        Set-GuiTheme -Control $form -Theme $theme
     }
 
     $grid.Add_SelectionChanged({
@@ -5453,7 +5473,7 @@ function Show-VaultGui {
     })
     $searchBox.Add_TextChanged({ & $refreshGrid })
     $themeButton.Add_Click({
-        Toggle-GuiThemeMode | Out-Null
+        Switch-GuiThemeMode | Out-Null
         & $applyTheme
     })
 
@@ -5707,7 +5727,7 @@ function Start-VaultXGui {
         $applyTheme = {
             $theme = Get-GuiThemeMode
             $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
-            Apply-GuiTheme -Control $form -Theme $theme
+            Set-GuiTheme -Control $form -Theme $theme
         }
 
         $openSelectedVault = {
@@ -5732,7 +5752,7 @@ function Start-VaultXGui {
         $buttons["open"].Add_Click({ & $openSelectedVault })
         $vaultList.Add_DoubleClick({ & $openSelectedVault })
         $themeButton.Add_Click({
-            Toggle-GuiThemeMode | Out-Null
+            Switch-GuiThemeMode | Out-Null
             & $applyTheme
         })
 
@@ -5902,7 +5922,7 @@ function Invoke-VaultX {
                     Show-CustomizeMenu | Out-Null
                 }
                 "wipe-cache" {
-                    if (Wipe-VaultCache) {
+                    if (Clear-VaultCache) {
                         $accounts = Sync-AccountsWithVaultFiles -Accounts @()
                         $selectedAccount = 0
                     }
