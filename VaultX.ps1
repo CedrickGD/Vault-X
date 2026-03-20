@@ -4127,6 +4127,32 @@ public static class VaultXConsoleInterop
     }
 }
 
+function Initialize-GuiWindowInterop {
+    if ($script:GuiWindowInteropInitialized) { return $true }
+    try {
+        if (-not ("VaultXWindowInterop" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class VaultXWindowInterop
+{
+    [DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]
+    public static extern int DwmSetWindowAttributeInt(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    [DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]
+    public static extern int DwmSetWindowAttributeUInt(IntPtr hwnd, int attr, ref uint attrValue, int attrSize);
+}
+"@ -ErrorAction Stop
+        }
+        $script:GuiWindowInteropInitialized = $true
+        return $true
+    } catch {
+        Write-Log ("GUI window interop init failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
 function Initialize-GuiFramework {
     if ($script:GuiInitialized) { return $true }
     try {
@@ -4145,6 +4171,7 @@ function Initialize-GuiFramework {
         Add-Type -AssemblyName System.Drawing -ErrorAction Stop
         [System.Windows.Forms.Application]::EnableVisualStyles()
         Initialize-ConsoleWindowInterop | Out-Null
+        Initialize-GuiWindowInterop | Out-Null
         $script:GuiInitialized = $true
         return $true
     } catch {
@@ -4164,42 +4191,100 @@ function Set-ConsoleWindowVisible {
     return $interop::ShowWindow($handle, $mode)
 }
 
+function ConvertTo-DwmColorRef {
+    param([System.Drawing.Color]$Color)
+    return [uint32](($Color.R) -bor ($Color.G -shl 8) -bor ($Color.B -shl 16))
+}
+
+function Apply-GuiWindowChrome {
+    param(
+        [object]$Form,
+        [string]$Theme
+    )
+    if ($null -eq $Form) { return }
+    if (-not (Initialize-GuiWindowInterop)) { return }
+
+    $interop = "VaultXWindowInterop" -as [type]
+    if ($null -eq $interop) { return }
+
+    try {
+        $handle = $Form.Handle
+    } catch {
+        return
+    }
+    if ($handle -eq [IntPtr]::Zero) { return }
+
+    try {
+        $isDark = if ([string]::IsNullOrWhiteSpace($Theme)) { (Get-GuiThemeMode -eq "dark") } else { ($Theme.Trim().ToLowerInvariant() -eq "dark") }
+        $darkValue = if ($isDark) { 1 } else { 0 }
+        foreach ($attribute in @(20, 19)) {
+            try {
+                [void]$interop::DwmSetWindowAttributeInt($handle, $attribute, [ref]$darkValue, 4)
+            } catch {}
+        }
+
+        if ($isDark) {
+            $captionColor = ConvertTo-DwmColorRef -Color ([System.Drawing.Color]::FromArgb(8, 8, 10))
+            $textColor = ConvertTo-DwmColorRef -Color ([System.Drawing.Color]::FromArgb(245, 245, 247))
+            $borderColor = ConvertTo-DwmColorRef -Color ([System.Drawing.Color]::FromArgb(8, 8, 10))
+        } else {
+            $captionColor = [uint32]::MaxValue
+            $textColor = [uint32]::MaxValue
+            $borderColor = [uint32]::MaxValue
+        }
+
+        try { [void]$interop::DwmSetWindowAttributeUInt($handle, 35, [ref]$captionColor, 4) } catch {}
+        try { [void]$interop::DwmSetWindowAttributeUInt($handle, 36, [ref]$textColor, 4) } catch {}
+        try { [void]$interop::DwmSetWindowAttributeUInt($handle, 34, [ref]$borderColor, 4) } catch {}
+    } catch {
+        Write-Log ("GUI window chrome update failed: {0}" -f $_.Exception.Message)
+    }
+}
+
 function Get-GuiThemePalette {
     param([string]$Theme)
     $mode = if ([string]::IsNullOrWhiteSpace($Theme)) { Get-GuiThemeMode } else { $Theme.Trim().ToLowerInvariant() }
     if ($mode -eq "light") {
         return @{
             Mode = "light"
-            BackColor = [System.Drawing.Color]::FromArgb(248, 248, 248)
-            PanelColor = [System.Drawing.Color]::White
-            TextColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
-            MutedTextColor = [System.Drawing.Color]::FromArgb(85, 85, 85)
-            AccentColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+            BackColor = [System.Drawing.Color]::FromArgb(240, 244, 250)
+            PanelColor = [System.Drawing.Color]::FromArgb(252, 253, 255)
+            PanelAltColor = [System.Drawing.Color]::FromArgb(228, 235, 245)
+            HeaderColor = [System.Drawing.Color]::FromArgb(216, 226, 240)
+            SidebarColor = [System.Drawing.Color]::FromArgb(223, 231, 242)
+            TextColor = [System.Drawing.Color]::FromArgb(22, 28, 37)
+            MutedTextColor = [System.Drawing.Color]::FromArgb(95, 105, 120)
+            AccentColor = [System.Drawing.Color]::FromArgb(34, 114, 196)
+            AccentSoftColor = [System.Drawing.Color]::FromArgb(215, 229, 247)
             InputBackColor = [System.Drawing.Color]::White
-            InputTextColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
-            ButtonBackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
-            ButtonTextColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
-            GridColor = [System.Drawing.Color]::FromArgb(224, 224, 224)
-            SelectionBackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+            InputTextColor = [System.Drawing.Color]::FromArgb(22, 28, 37)
+            ButtonBackColor = [System.Drawing.Color]::FromArgb(232, 238, 246)
+            ButtonTextColor = [System.Drawing.Color]::FromArgb(22, 28, 37)
+            GridColor = [System.Drawing.Color]::FromArgb(214, 220, 229)
+            SelectionBackColor = [System.Drawing.Color]::FromArgb(34, 114, 196)
             SelectionTextColor = [System.Drawing.Color]::White
-            BorderColor = [System.Drawing.Color]::FromArgb(210, 210, 210)
+            BorderColor = [System.Drawing.Color]::FromArgb(204, 212, 224)
         }
     }
     return @{
         Mode = "dark"
-        BackColor = [System.Drawing.Color]::FromArgb(24, 24, 28)
-        PanelColor = [System.Drawing.Color]::FromArgb(32, 32, 38)
-        TextColor = [System.Drawing.Color]::FromArgb(236, 236, 240)
-        MutedTextColor = [System.Drawing.Color]::FromArgb(170, 170, 180)
-        AccentColor = [System.Drawing.Color]::FromArgb(88, 166, 255)
-        InputBackColor = [System.Drawing.Color]::FromArgb(18, 18, 22)
-        InputTextColor = [System.Drawing.Color]::FromArgb(242, 242, 245)
-        ButtonBackColor = [System.Drawing.Color]::FromArgb(44, 44, 52)
-        ButtonTextColor = [System.Drawing.Color]::FromArgb(242, 242, 245)
-        GridColor = [System.Drawing.Color]::FromArgb(58, 58, 68)
-        SelectionBackColor = [System.Drawing.Color]::FromArgb(58, 110, 165)
+        BackColor = [System.Drawing.Color]::FromArgb(9, 12, 16)
+        PanelColor = [System.Drawing.Color]::FromArgb(20, 25, 31)
+        PanelAltColor = [System.Drawing.Color]::FromArgb(30, 36, 44)
+        HeaderColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
+        SidebarColor = [System.Drawing.Color]::FromArgb(14, 18, 24)
+        TextColor = [System.Drawing.Color]::FromArgb(234, 238, 244)
+        MutedTextColor = [System.Drawing.Color]::FromArgb(148, 156, 168)
+        AccentColor = [System.Drawing.Color]::FromArgb(73, 151, 233)
+        AccentSoftColor = [System.Drawing.Color]::FromArgb(26, 38, 52)
+        InputBackColor = [System.Drawing.Color]::FromArgb(7, 10, 14)
+        InputTextColor = [System.Drawing.Color]::FromArgb(240, 244, 248)
+        ButtonBackColor = [System.Drawing.Color]::FromArgb(34, 40, 49)
+        ButtonTextColor = [System.Drawing.Color]::FromArgb(240, 244, 248)
+        GridColor = [System.Drawing.Color]::FromArgb(47, 56, 67)
+        SelectionBackColor = [System.Drawing.Color]::FromArgb(45, 116, 191)
         SelectionTextColor = [System.Drawing.Color]::White
-        BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 82)
+        BorderColor = [System.Drawing.Color]::FromArgb(54, 64, 76)
     }
 }
 
@@ -4214,6 +4299,7 @@ function Set-GuiTheme {
     if ($Control -is [System.Windows.Forms.Form]) {
         $Control.BackColor = $palette.BackColor
         $Control.ForeColor = $palette.TextColor
+        Apply-GuiWindowChrome -Form $Control -Theme $palette.Mode
     } elseif ($Control -is [System.Windows.Forms.GroupBox]) {
         $Control.BackColor = $palette.BackColor
         $Control.ForeColor = $palette.TextColor
@@ -4227,12 +4313,36 @@ function Set-GuiTheme {
         $Control.BackColor = $palette.BackColor
         $Control.ForeColor = $palette.TextColor
     } elseif ($Control -is [System.Windows.Forms.Button]) {
-        $Control.BackColor = $palette.ButtonBackColor
-        $Control.ForeColor = $palette.ButtonTextColor
+        $tag = if ($null -eq $Control.Tag) { "" } else { [string]$Control.Tag }
+        $buttonBack = $palette.ButtonBackColor
+        $buttonFore = $palette.ButtonTextColor
+        $border = $palette.BorderColor
+        $hover = $palette.PanelAltColor
+        $down = $palette.AccentSoftColor
+        switch ($tag.Trim().ToLowerInvariant()) {
+            "primary" {
+                $buttonBack = $palette.AccentColor
+                $buttonFore = [System.Drawing.Color]::White
+                $border = $palette.AccentColor
+                $hover = if ($palette.Mode -eq "dark") { [System.Drawing.Color]::FromArgb(88, 166, 246) } else { [System.Drawing.Color]::FromArgb(52, 129, 209) }
+                $down = if ($palette.Mode -eq "dark") { [System.Drawing.Color]::FromArgb(57, 132, 213) } else { [System.Drawing.Color]::FromArgb(29, 103, 182) }
+            }
+            "danger" {
+                $buttonBack = if ($palette.Mode -eq "dark") { [System.Drawing.Color]::FromArgb(122, 46, 56) } else { [System.Drawing.Color]::FromArgb(190, 81, 93) }
+                $buttonFore = [System.Drawing.Color]::White
+                $border = $buttonBack
+                $hover = if ($palette.Mode -eq "dark") { [System.Drawing.Color]::FromArgb(142, 58, 70) } else { [System.Drawing.Color]::FromArgb(202, 95, 107) }
+                $down = if ($palette.Mode -eq "dark") { [System.Drawing.Color]::FromArgb(106, 38, 48) } else { [System.Drawing.Color]::FromArgb(175, 70, 83) }
+            }
+        }
+        $Control.BackColor = $buttonBack
+        $Control.ForeColor = $buttonFore
+        $Control.UseVisualStyleBackColor = $false
         $Control.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-        $Control.FlatAppearance.BorderColor = $palette.BorderColor
-        $Control.FlatAppearance.MouseOverBackColor = $palette.AccentColor
-        $Control.FlatAppearance.MouseDownBackColor = $palette.AccentColor
+        $Control.FlatAppearance.BorderSize = 1
+        $Control.FlatAppearance.BorderColor = $border
+        $Control.FlatAppearance.MouseOverBackColor = $hover
+        $Control.FlatAppearance.MouseDownBackColor = $down
     } elseif ($Control -is [System.Windows.Forms.TextBox]) {
         $Control.BackColor = $palette.InputBackColor
         $Control.ForeColor = $palette.InputTextColor
@@ -4255,13 +4365,13 @@ function Set-GuiTheme {
         $Control.DefaultCellStyle.ForeColor = $palette.InputTextColor
         $Control.DefaultCellStyle.SelectionBackColor = $palette.SelectionBackColor
         $Control.DefaultCellStyle.SelectionForeColor = $palette.SelectionTextColor
-        $Control.AlternatingRowsDefaultCellStyle.BackColor = if ($palette.Mode -eq "dark") { [System.Drawing.Color]::FromArgb(22, 22, 26) } else { [System.Drawing.Color]::FromArgb(245, 245, 245) }
+        $Control.AlternatingRowsDefaultCellStyle.BackColor = $palette.PanelAltColor
         $Control.AlternatingRowsDefaultCellStyle.ForeColor = $palette.InputTextColor
         $Control.AlternatingRowsDefaultCellStyle.SelectionBackColor = $palette.SelectionBackColor
         $Control.AlternatingRowsDefaultCellStyle.SelectionForeColor = $palette.SelectionTextColor
-        $Control.ColumnHeadersDefaultCellStyle.BackColor = $palette.PanelColor
+        $Control.ColumnHeadersDefaultCellStyle.BackColor = $palette.PanelAltColor
         $Control.ColumnHeadersDefaultCellStyle.ForeColor = $palette.TextColor
-        $Control.ColumnHeadersDefaultCellStyle.SelectionBackColor = $palette.PanelColor
+        $Control.ColumnHeadersDefaultCellStyle.SelectionBackColor = $palette.PanelAltColor
         $Control.ColumnHeadersDefaultCellStyle.SelectionForeColor = $palette.TextColor
     }
 
@@ -5501,28 +5611,62 @@ function Show-VaultGui {
     $title = if ($vaultMeta.AccountName) { "$script:AppName - $($vaultMeta.AccountName)" } else { "$script:AppName - Vault" }
     $form.Text = $title
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
-    $form.ClientSize = New-Object System.Drawing.Size(1035, 610)
-    $form.MinimumSize = New-Object System.Drawing.Size(1051, 649)
+    $form.ClientSize = New-Object System.Drawing.Size(1126, 664)
+    $form.MinimumSize = New-Object System.Drawing.Size(1142, 703)
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+
+    $headerPanel = New-Object System.Windows.Forms.Panel
+    $headerPanel.SetBounds(0, 0, 1126, 68)
+    $headerPanel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $form.Controls.Add($headerPanel)
+
+    $titleLabel = New-Object System.Windows.Forms.Label
+    $titleLabel.Text = if ($vaultMeta.AccountName) { $vaultMeta.AccountName } else { "Vault" }
+    $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 20, [System.Drawing.FontStyle]::Bold)
+    $titleLabel.SetBounds(20, 14, 420, 36)
+    $headerPanel.Controls.Add($titleLabel)
+
+    $headerInfoLabel = New-Object System.Windows.Forms.Label
+    $headerInfoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+    $headerInfoLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+    $headerInfoLabel.SetBounds(710, 24, 220, 20)
+    $headerInfoLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    $headerPanel.Controls.Add($headerInfoLabel)
 
     $searchLabel = New-Object System.Windows.Forms.Label
     $searchLabel.Text = "Search"
-    $searchLabel.SetBounds(16, 18, 48, 18)
-    $form.Controls.Add($searchLabel)
+    $searchLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5, [System.Drawing.FontStyle]::Bold)
 
     $searchBox = New-Object System.Windows.Forms.TextBox
-    $searchBox.SetBounds(70, 14, 320, 24)
-    $form.Controls.Add($searchBox)
+    $searchBox.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Regular)
 
     $statusLabel = New-Object System.Windows.Forms.Label
-    $statusLabel.SetBounds(410, 18, 360, 18)
-    $form.Controls.Add($statusLabel)
+    $statusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+    $statusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+    $statusLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 
     $themeButton = New-Object System.Windows.Forms.Button
-    $themeButton.SetBounds(796, 12, 223, 30)
-    $form.Controls.Add($themeButton)
+    $themeButton.Tag = "subtle"
+    $themeButton.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5, [System.Drawing.FontStyle]::Bold)
+    $themeButton.SetBounds(948, 16, 158, 34)
+    $themeButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    $headerPanel.Controls.Add($themeButton)
+
+    $contentPanel = New-Object System.Windows.Forms.Panel
+    $contentPanel.SetBounds(18, 86, 808, 560)
+    $contentPanel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
+    $form.Controls.Add($contentPanel)
+    $contentPanel.Controls.Add($searchLabel)
+    $searchLabel.SetBounds(18, 18, 60, 22)
+    $contentPanel.Controls.Add($searchBox)
+    $searchBox.SetBounds(82, 14, 320, 30)
+    $contentPanel.Controls.Add($statusLabel)
+    $statusLabel.SetBounds(422, 18, 368, 20)
 
     $grid = New-Object System.Windows.Forms.DataGridView
-    $grid.SetBounds(16, 50, 760, 544)
+    $grid.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Regular)
+    $grid.SetBounds(18, 58, 772, 484)
+    $grid.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
     $grid.AutoGenerateColumns = $false
     $grid.ReadOnly = $true
     $grid.AllowUserToAddRows = $false
@@ -5532,7 +5676,10 @@ function Show-VaultGui {
     $grid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
     $grid.RowHeadersVisible = $false
     $grid.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::None
-    $form.Controls.Add($grid)
+    $grid.RowTemplate.Height = 32
+    $grid.ColumnHeadersHeight = 36
+    $grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
+    $contentPanel.Controls.Add($grid)
 
     $columns = @(
         @{ Name = "EntryId"; Header = "EntryId"; Property = "EntryId"; Width = 5; Visible = $false }
@@ -5552,27 +5699,41 @@ function Show-VaultGui {
         [void]$grid.Columns.Add($column)
     }
 
+    $actionPanel = New-Object System.Windows.Forms.Panel
+    $actionPanel.SetBounds(844, 86, 264, 560)
+    $actionPanel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
+    $form.Controls.Add($actionPanel)
+
+    $actionsLabel = New-Object System.Windows.Forms.Label
+    $actionsLabel.Text = "Actions"
+    $actionsLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10, [System.Drawing.FontStyle]::Bold)
+    $actionsLabel.SetBounds(18, 18, 120, 22)
+    $actionPanel.Controls.Add($actionsLabel)
+
     $buttonSpecs = @(
-        @{ Name = "add"; Label = "Add Entry"; Top = 50 }
-        @{ Name = "view"; Label = "View Entry"; Top = 86 }
-        @{ Name = "edit"; Label = "Edit Entry"; Top = 122 }
-        @{ Name = "delete"; Label = "Delete Entry"; Top = 158 }
-        @{ Name = "copy-user"; Label = "Copy Username"; Top = 194 }
-        @{ Name = "copy-pass"; Label = "Copy Password"; Top = 230 }
-        @{ Name = "open-url"; Label = "Open URL"; Top = 266 }
-        @{ Name = "import-csv"; Label = "Import CSV"; Top = 302 }
-        @{ Name = "export"; Label = "Export Vault"; Top = 338 }
-        @{ Name = "twofactor"; Label = "2FA Settings"; Top = 374 }
-        @{ Name = "recovery"; Label = "Recovery"; Top = 410 }
-        @{ Name = "lock"; Label = "Lock Vault"; Top = 446 }
+        @{ Name = "add"; Label = "Add Entry"; Top = 48; Tag = "primary" }
+        @{ Name = "view"; Label = "View Entry"; Top = 88; Tag = "" }
+        @{ Name = "edit"; Label = "Edit Entry"; Top = 128; Tag = "" }
+        @{ Name = "delete"; Label = "Delete Entry"; Top = 168; Tag = "danger" }
+        @{ Name = "copy-user"; Label = "Copy Username"; Top = 208; Tag = "" }
+        @{ Name = "copy-pass"; Label = "Copy Password"; Top = 248; Tag = "" }
+        @{ Name = "open-url"; Label = "Open URL"; Top = 288; Tag = "" }
+        @{ Name = "import-csv"; Label = "Import CSV"; Top = 328; Tag = "" }
+        @{ Name = "export"; Label = "Export Vault"; Top = 368; Tag = "" }
+        @{ Name = "twofactor"; Label = "2FA Settings"; Top = 408; Tag = "" }
+        @{ Name = "recovery"; Label = "Recovery"; Top = 448; Tag = "" }
+        @{ Name = "lock"; Label = "Lock Vault"; Top = 488; Tag = "primary" }
     )
     $buttons = @{}
     foreach ($buttonSpec in $buttonSpecs) {
         $button = New-Object System.Windows.Forms.Button
         $button.Text = $buttonSpec.Label
-        $button.SetBounds(796, $buttonSpec.Top, 223, 30)
+        $button.Tag = $buttonSpec.Tag
+        $button.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5, [System.Drawing.FontStyle]::Bold)
+        $button.SetBounds(18, $buttonSpec.Top, 228, 32)
+        $button.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
         $buttons[$buttonSpec.Name] = $button
-        $form.Controls.Add($button)
+        $actionPanel.Controls.Add($button)
     }
 
     $getSelectedEntry = {
@@ -5619,6 +5780,11 @@ function Show-VaultGui {
         } else {
             "{0} matching of {1} entries" -f $entries.Count, $vaultData.Entries.Count
         }
+        $headerInfoLabel.Text = if ([string]::IsNullOrWhiteSpace($searchBox.Text)) {
+            "{0} item(s)" -f $vaultData.Entries.Count
+        } else {
+            "{0}/{1} shown" -f $entries.Count, $vaultData.Entries.Count
+        }
 
         if ($grid.Rows.Count -gt 0) {
             $targetRow = 0
@@ -5643,6 +5809,15 @@ function Show-VaultGui {
         $theme = Get-GuiThemeMode
         $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
         Set-GuiTheme -Control $form -Theme $theme
+        $palette = Get-GuiThemePalette -Theme $theme
+        $headerPanel.BackColor = $palette.HeaderColor
+        $contentPanel.BackColor = $palette.PanelColor
+        $actionPanel.BackColor = $palette.SidebarColor
+        $titleLabel.ForeColor = if ($theme -eq "dark") { [System.Drawing.Color]::White } else { $palette.TextColor }
+        $headerInfoLabel.ForeColor = $palette.MutedTextColor
+        $searchLabel.ForeColor = $palette.MutedTextColor
+        $statusLabel.ForeColor = $palette.MutedTextColor
+        $actionsLabel.ForeColor = $palette.MutedTextColor
     }
 
     $grid.Add_SelectionChanged({
@@ -5842,53 +6017,91 @@ function Start-VaultXGui {
         $form = New-Object System.Windows.Forms.Form
         $form.Text = "$script:AppName GUI"
         $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-        $form.ClientSize = New-Object System.Drawing.Size(760, 420)
-        $form.MinimumSize = New-Object System.Drawing.Size(776, 459)
+        $form.ClientSize = New-Object System.Drawing.Size(874, 500)
+        $form.MinimumSize = New-Object System.Drawing.Size(890, 539)
+        $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+
+        $headerPanel = New-Object System.Windows.Forms.Panel
+        $headerPanel.SetBounds(0, 0, 874, 68)
+        $headerPanel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+        $form.Controls.Add($headerPanel)
 
         $titleLabel = New-Object System.Windows.Forms.Label
-        $titleLabel.Text = "$script:AppName GUI"
-        $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
-        $titleLabel.SetBounds(20, 16, 220, 30)
-        $form.Controls.Add($titleLabel)
+        $titleLabel.Text = "$script:AppName"
+        $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 20, [System.Drawing.FontStyle]::Bold)
+        $titleLabel.SetBounds(20, 14, 220, 36)
+        $headerPanel.Controls.Add($titleLabel)
 
-        $subtitleLabel = New-Object System.Windows.Forms.Label
-        $subtitleLabel.Text = "The terminal process stays active while you work in the local window."
-        $subtitleLabel.SetBounds(20, 50, 500, 18)
-        $form.Controls.Add($subtitleLabel)
+        $headerInfoLabel = New-Object System.Windows.Forms.Label
+        $headerInfoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+        $headerInfoLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+        $headerInfoLabel.SetBounds(500, 24, 180, 20)
+        $headerInfoLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+        $headerPanel.Controls.Add($headerInfoLabel)
 
         $vaultsLabel = New-Object System.Windows.Forms.Label
         $vaultsLabel.Text = "Vaults"
-        $vaultsLabel.SetBounds(20, 86, 60, 18)
-        $form.Controls.Add($vaultsLabel)
+        $vaultsLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10, [System.Drawing.FontStyle]::Bold)
 
         $vaultList = New-Object System.Windows.Forms.ListBox
-        $vaultList.SetBounds(20, 110, 430, 250)
-        $form.Controls.Add($vaultList)
+        $vaultList.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Regular)
+        $vaultList.DrawMode = [System.Windows.Forms.DrawMode]::OwnerDrawFixed
+        $vaultList.ItemHeight = 24
+        $vaultList.IntegralHeight = $false
+        $vaultList.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
 
         $statusLabel = New-Object System.Windows.Forms.Label
-        $statusLabel.SetBounds(20, 372, 430, 18)
-        $form.Controls.Add($statusLabel)
+        $statusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+        $statusLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
 
         $themeButton = New-Object System.Windows.Forms.Button
-        $themeButton.SetBounds(568, 16, 160, 30)
-        $form.Controls.Add($themeButton)
+        $themeButton.Tag = "subtle"
+        $themeButton.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5, [System.Drawing.FontStyle]::Bold)
+        $themeButton.SetBounds(698, 16, 154, 34)
+        $themeButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+        $headerPanel.Controls.Add($themeButton)
+
+        $vaultPanel = New-Object System.Windows.Forms.Panel
+        $vaultPanel.SetBounds(18, 86, 544, 396)
+        $vaultPanel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
+        $form.Controls.Add($vaultPanel)
+        $vaultPanel.Controls.Add($vaultsLabel)
+        $vaultsLabel.SetBounds(18, 14, 120, 22)
+        $vaultPanel.Controls.Add($vaultList)
+        $vaultList.SetBounds(18, 46, 508, 280)
+        $vaultPanel.Controls.Add($statusLabel)
+        $statusLabel.SetBounds(18, 342, 508, 36)
+
+        $actionPanel = New-Object System.Windows.Forms.Panel
+        $actionPanel.SetBounds(580, 86, 274, 396)
+        $actionPanel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
+        $form.Controls.Add($actionPanel)
+
+        $actionsLabel = New-Object System.Windows.Forms.Label
+        $actionsLabel.Text = "Actions"
+        $actionsLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10, [System.Drawing.FontStyle]::Bold)
+        $actionsLabel.SetBounds(18, 14, 120, 22)
+        $actionPanel.Controls.Add($actionsLabel)
 
         $buttonSpecs = @(
-            @{ Name = "open"; Label = "Open Selected"; Top = 110 }
-            @{ Name = "create"; Label = "Create Vault"; Top = 146 }
-            @{ Name = "import"; Label = "Import Vault"; Top = 182 }
-            @{ Name = "remove"; Label = "Remove Vault"; Top = 218 }
-            @{ Name = "refresh"; Label = "Refresh"; Top = 254 }
-            @{ Name = "open-data"; Label = "Open Data Folder"; Top = 290 }
-            @{ Name = "terminal"; Label = "Return to Terminal"; Top = 326 }
+            @{ Name = "open"; Label = "Open Selected"; Top = 48; Tag = "primary" }
+            @{ Name = "create"; Label = "Create Vault"; Top = 92; Tag = "" }
+            @{ Name = "import"; Label = "Import Vault"; Top = 136; Tag = "" }
+            @{ Name = "remove"; Label = "Remove Vault"; Top = 180; Tag = "danger" }
+            @{ Name = "refresh"; Label = "Refresh"; Top = 224; Tag = "" }
+            @{ Name = "open-data"; Label = "Open Data Folder"; Top = 268; Tag = "" }
+            @{ Name = "terminal"; Label = "Return to Terminal"; Top = 330; Tag = "" }
         )
         $buttons = @{}
         foreach ($buttonSpec in $buttonSpecs) {
             $button = New-Object System.Windows.Forms.Button
             $button.Text = $buttonSpec.Label
-            $button.SetBounds(488, $buttonSpec.Top, 240, 30)
+            $button.Tag = $buttonSpec.Tag
+            $button.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5, [System.Drawing.FontStyle]::Bold)
+            $button.SetBounds(18, $buttonSpec.Top, 238, 34)
+            $button.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
             $buttons[$buttonSpec.Name] = $button
-            $form.Controls.Add($button)
+            $actionPanel.Controls.Add($button)
         }
 
         $refreshAccounts = {
@@ -5900,6 +6113,7 @@ function Start-VaultXGui {
                 [void]$vaultList.Items.Add($account.Name)
             }
             $vaultList.EndUpdate()
+            $headerInfoLabel.Text = "{0} vault(s)" -f $state.Accounts.Count
             if ($vaultList.Items.Count -eq 0) {
                 $statusLabel.Text = "No vaults found. Create or import one to get started."
                 return
@@ -5920,10 +6134,49 @@ function Start-VaultXGui {
             return $state.Accounts[$vaultList.SelectedIndex]
         }
 
+        $vaultList.Add_DrawItem({
+            param($sender, $e)
+            $e.DrawBackground()
+            if ($e.Index -lt 0 -or $e.Index -ge $sender.Items.Count) { return }
+
+            $palette = Get-GuiThemePalette -Theme (Get-GuiThemeMode)
+            $selected = (($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -eq [System.Windows.Forms.DrawItemState]::Selected)
+            $backColor = if ($selected) { $palette.AccentColor } else { $palette.InputBackColor }
+            $textColor = if ($selected) { [System.Drawing.Color]::White } else { $palette.InputTextColor }
+            $backBrush = New-Object System.Drawing.SolidBrush($backColor)
+            $textBrush = New-Object System.Drawing.SolidBrush($textColor)
+            try {
+                $e.Graphics.FillRectangle($backBrush, $e.Bounds)
+                $textRect = New-Object System.Drawing.Rectangle($e.Bounds.X + 10, $e.Bounds.Y + 2, $e.Bounds.Width - 20, $e.Bounds.Height - 4)
+                $format = New-Object System.Drawing.StringFormat
+                $format.LineAlignment = [System.Drawing.StringAlignment]::Center
+                $format.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
+                try {
+                    $e.Graphics.DrawString([string]$sender.Items[$e.Index], $sender.Font, $textBrush, $textRect, $format)
+                } finally {
+                    $format.Dispose()
+                }
+            } finally {
+                $backBrush.Dispose()
+                $textBrush.Dispose()
+            }
+            $e.DrawFocusRectangle()
+        })
+
         $applyTheme = {
             $theme = Get-GuiThemeMode
             $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
             Set-GuiTheme -Control $form -Theme $theme
+            $palette = Get-GuiThemePalette -Theme $theme
+            $headerPanel.BackColor = $palette.HeaderColor
+            $vaultPanel.BackColor = $palette.PanelColor
+            $actionPanel.BackColor = $palette.SidebarColor
+            $titleLabel.ForeColor = if ($theme -eq "dark") { [System.Drawing.Color]::White } else { $palette.TextColor }
+            $headerInfoLabel.ForeColor = $palette.MutedTextColor
+            $vaultsLabel.ForeColor = $palette.MutedTextColor
+            $actionsLabel.ForeColor = $palette.MutedTextColor
+            $statusLabel.ForeColor = $palette.MutedTextColor
+            $vaultList.Invalidate()
         }
 
         $openSelectedVault = {
