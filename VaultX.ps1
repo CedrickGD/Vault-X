@@ -38,6 +38,12 @@ $script:GuiTheme = "dark"
 $script:FrameBufferActive = $false
 $script:FrameBufferLines = @()
 $script:LastFrameLineCount = 0
+$script:GuiWindowRegistry = @()
+$script:GuiVaultSessions = @{}
+$script:GuiLauncherForm = $null
+$script:GuiIconCache = @{}
+$script:GuiClipboardAutoClearTimer = $null
+$script:GuiClipboardAutoClearTarget = $null
 try {
     if ($Host -and $Host.UI -and $Host.UI.RawUI) {
         $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
@@ -1802,8 +1808,81 @@ try {
     }
 }
 
+function Stop-GuiClipboardAutoClearTimer {
+    if ($null -eq $script:GuiClipboardAutoClearTimer) { return }
+    try { $script:GuiClipboardAutoClearTimer.Stop() } catch { $null = $script:GuiClipboardAutoClearTimer }
+    try { $script:GuiClipboardAutoClearTimer.Dispose() } catch { $null = $script:GuiClipboardAutoClearTimer }
+    $script:GuiClipboardAutoClearTimer = $null
+    $script:GuiClipboardAutoClearTarget = $null
+}
+
+function Test-GuiClipboardMode {
+    if (-not $script:GuiInitialized) { return $false }
+    if ($null -ne $script:GuiLauncherForm) {
+        try {
+            if (-not $script:GuiLauncherForm.IsDisposed) { return $true }
+        } catch {
+            $null = $script:GuiLauncherForm
+        }
+    }
+    foreach ($entry in @(Sync-GuiWindowRegistry)) {
+        $form = $entry.Form
+        if ($null -eq $form) { continue }
+        try {
+            if (-not $form.IsDisposed) { return $true }
+        } catch {
+            $null = $form
+        }
+    }
+    return $false
+}
+
+function Start-GuiClipboardAutoClearTimer {
+    param([string]$ExpectedValue)
+    if ([string]::IsNullOrEmpty($ExpectedValue)) { return }
+    if ($script:ClipboardAutoClearSeconds -le 0) { return }
+    if (-not (Test-GuiClipboardMode)) { return }
+    if (-not (Initialize-GuiFramework)) { return }
+
+    Stop-GuiClipboardAutoClearTimer
+    $script:GuiClipboardAutoClearTarget = $ExpectedValue
+
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = [Math]::Max(250, ($script:ClipboardAutoClearSeconds * 1000))
+    $timer.Add_Tick(({
+        try {
+            $current = ""
+            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                $current = [System.Windows.Forms.Clipboard]::GetText()
+            }
+            if ($current -eq $script:GuiClipboardAutoClearTarget) {
+                [System.Windows.Forms.Clipboard]::SetText("")
+            }
+        } catch {
+            Write-Log ("GUI clipboard auto-clear failed: {0}" -f $_.Exception.Message)
+        } finally {
+            Stop-GuiClipboardAutoClearTimer
+        }
+    }).GetNewClosure())
+    $script:GuiClipboardAutoClearTimer = $timer
+    $timer.Start()
+}
+
 function Set-ClipboardSafe {
     param([string]$Value)
+    if (Test-GuiClipboardMode) {
+        try {
+            if ([string]::IsNullOrEmpty($Value)) {
+                [System.Windows.Forms.Clipboard]::Clear()
+            } else {
+                [System.Windows.Forms.Clipboard]::SetText($Value)
+            }
+            Start-GuiClipboardAutoClearTimer -ExpectedValue $Value
+            return $true
+        } catch {
+            Write-Log ("GUI clipboard update failed: {0}" -f $_.Exception.Message)
+        }
+    }
     $cmd = Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue
     if ($null -eq $cmd) { return $false }
     try {
@@ -4116,6 +4195,19 @@ public static class VaultXConsoleInterop
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("dwmapi.dll", PreserveSig = true)]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll", PreserveSig = true)]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref uint pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll", PreserveSig = true)]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, [MarshalAs(UnmanagedType.Bool)] ref bool pvAttribute, int cbAttribute);
 }
 "@ -ErrorAction Stop
         }
@@ -4269,6 +4361,365 @@ function Set-GuiTheme {
         foreach ($child in $Control.Controls) {
             Set-GuiTheme -Control $child -Theme $palette.Mode
         }
+    }
+}
+
+function Get-WindowsBuildNumber {
+    try {
+        return [Environment]::OSVersion.Version.Build
+    } catch {
+        return 0
+    }
+}
+
+function Set-DwmWindowAttributeInt {
+    param(
+        [System.IntPtr]$Handle,
+        [int]$Attribute,
+        [int]$Value
+    )
+    $interop = "VaultXConsoleInterop" -as [type]
+    if ($null -eq $interop -or $Handle -eq [IntPtr]::Zero) { return $false }
+    try {
+        $result = $interop::DwmSetWindowAttribute($Handle, $Attribute, [ref]$Value, [Runtime.InteropServices.Marshal]::SizeOf([type][int]))
+        return ($result -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Set-DwmWindowAttributeBool {
+    param(
+        [System.IntPtr]$Handle,
+        [int]$Attribute,
+        [bool]$Value
+    )
+    $interop = "VaultXConsoleInterop" -as [type]
+    if ($null -eq $interop -or $Handle -eq [IntPtr]::Zero) { return $false }
+    try {
+        $result = $interop::DwmSetWindowAttribute($Handle, $Attribute, [ref]$Value, [Runtime.InteropServices.Marshal]::SizeOf([type][bool]))
+        return ($result -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Update-GuiWindowFrameStyle {
+    param(
+        [System.Windows.Forms.Form]$Form,
+        [string]$Theme,
+        [string]$Role
+    )
+    if ($null -eq $Form) { return }
+    $build = Get-WindowsBuildNumber
+    if ($build -lt 22000) { return }
+
+    $handle = [IntPtr]::Zero
+    try {
+        $handle = $Form.Handle
+    } catch {
+        return
+    }
+    if ($handle -eq [IntPtr]::Zero) { return }
+
+    $isDark = ($Theme -eq "dark")
+    Set-DwmWindowAttributeBool -Handle $handle -Attribute 20 -Value $isDark | Out-Null
+
+    if ($build -ge 22621) {
+        $backdrop = if ($Role -eq "vault") { 4 } else { 2 }
+        Set-DwmWindowAttributeInt -Handle $handle -Attribute 38 -Value $backdrop | Out-Null
+    }
+}
+
+function Sync-GuiWindowRegistry {
+    if ($null -eq $script:GuiWindowRegistry) {
+        $script:GuiWindowRegistry = @()
+    }
+    $active = @()
+    foreach ($entry in @($script:GuiWindowRegistry)) {
+        $form = $entry.Form
+        if ($null -eq $form) { continue }
+        $disposed = $true
+        try {
+            $disposed = $form.IsDisposed
+        } catch {
+            $disposed = $true
+        }
+        if (-not $disposed) {
+            $active += $entry
+        }
+    }
+    $script:GuiWindowRegistry = $active
+    return $script:GuiWindowRegistry
+}
+
+function Get-GuiWindowRegistryEntry {
+    param([object]$Form)
+    if ($null -eq $Form) { return $null }
+    foreach ($entry in @(Sync-GuiWindowRegistry)) {
+        if ($entry.Form -eq $Form) {
+            return $entry
+        }
+    }
+    return $null
+}
+
+function Unregister-GuiWindow {
+    param([object]$Form)
+    if ($null -eq $Form) { return }
+    $updated = @()
+    foreach ($entry in @(Sync-GuiWindowRegistry)) {
+        if ($entry.Form -ne $Form) {
+            $updated += $entry
+        }
+    }
+    $script:GuiWindowRegistry = $updated
+}
+
+function Get-GuiThemeButtonText {
+    param([string]$Theme)
+    if ($Theme -eq "light") { return "Theme: Light" }
+    return "Theme: Dark"
+}
+
+function Get-GuiSessionKey {
+    param([string]$VaultPath)
+    if ([string]::IsNullOrWhiteSpace($VaultPath)) { return $null }
+    try {
+        return ([IO.Path]::GetFullPath($VaultPath)).ToLowerInvariant()
+    } catch {
+        return $VaultPath.ToLowerInvariant()
+    }
+}
+
+function Get-GuiVaultSession {
+    param([string]$VaultPath)
+    if ($null -eq $script:GuiVaultSessions) {
+        $script:GuiVaultSessions = @{}
+    }
+    $key = Get-GuiSessionKey -VaultPath $VaultPath
+    if ([string]::IsNullOrWhiteSpace($key)) { return $null }
+    if ($script:GuiVaultSessions.ContainsKey($key)) {
+        return $script:GuiVaultSessions[$key]
+    }
+    return $null
+}
+
+function Set-GuiVaultSession {
+    param(
+        [string]$VaultPath,
+        $Vault
+    )
+    if ($null -eq $script:GuiVaultSessions) {
+        $script:GuiVaultSessions = @{}
+    }
+    $key = Get-GuiSessionKey -VaultPath $VaultPath
+    if ([string]::IsNullOrWhiteSpace($key)) { return $null }
+    $existing = Get-GuiVaultSession -VaultPath $VaultPath
+    $resolvedPath = $VaultPath
+    try {
+        $resolvedPath = [IO.Path]::GetFullPath($VaultPath)
+    } catch {
+        $resolvedPath = $VaultPath
+    }
+    $session = [ordered]@{
+        Key = $key
+        VaultPath = $resolvedPath
+        Vault = $Vault
+        Form = if ($null -ne $existing) { $existing.Form } else { $null }
+    }
+    $script:GuiVaultSessions[$key] = $session
+    return $session
+}
+
+function Set-GuiVaultSessionForm {
+    param(
+        [string]$VaultPath,
+        [object]$Form
+    )
+    $session = Get-GuiVaultSession -VaultPath $VaultPath
+    if ($null -eq $session) { return }
+    $session.Form = $Form
+    $script:GuiVaultSessions[$session.Key] = $session
+}
+
+function Clear-GuiVaultSession {
+    param([string]$VaultPath)
+    if ($null -eq $script:GuiVaultSessions) {
+        $script:GuiVaultSessions = @{}
+    }
+    $key = Get-GuiSessionKey -VaultPath $VaultPath
+    if ([string]::IsNullOrWhiteSpace($key)) { return }
+    if ($script:GuiVaultSessions.ContainsKey($key)) {
+        $script:GuiVaultSessions.Remove($key) | Out-Null
+    }
+}
+
+function Show-GuiForm {
+    param([System.Windows.Forms.Form]$Form)
+    if ($null -eq $Form) { return }
+    try {
+        if ($Form.IsDisposed) { return }
+    } catch {
+        return
+    }
+    try {
+        if ($Form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+            $Form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        }
+    } catch {
+        $null = $Form
+    }
+    try {
+        if (-not $Form.Visible) {
+            [void]$Form.Show()
+        }
+    } catch {
+        $null = $Form
+    }
+    try { $Form.BringToFront() } catch { $null = $Form }
+    try { $Form.Activate() } catch { $null = $Form }
+}
+
+function Show-GuiLauncherForm {
+    if ($null -eq $script:GuiLauncherForm) { return }
+    Show-GuiForm -Form $script:GuiLauncherForm
+}
+
+function New-GuiWindowIcon {
+    param(
+        [ValidateSet("locked", "unlocked")]
+        [string]$State,
+        [string]$Theme
+    )
+    if (-not (Initialize-GuiFramework)) { return $null }
+
+    $mode = if ([string]::IsNullOrWhiteSpace($Theme)) { Get-GuiThemeMode } else { $Theme.Trim().ToLowerInvariant() }
+    $bodyColor = [System.Drawing.Color]::FromArgb(255, 46, 88, 142)
+    $outlineColor = [System.Drawing.Color]::FromArgb(255, 24, 28, 34)
+    $ringColor = if ($mode -eq "dark") {
+        [System.Drawing.Color]::FromArgb(255, 248, 250, 252)
+    } else {
+        $outlineColor
+    }
+    $keyholeColor = [System.Drawing.Color]::FromArgb(255, 244, 246, 248)
+
+    $bitmap = New-Object System.Drawing.Bitmap 32, 32
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $bodyBrush = New-Object System.Drawing.SolidBrush($bodyColor)
+    $outlinePen = New-Object System.Drawing.Pen($outlineColor, 2.8)
+    $ringPen = New-Object System.Drawing.Pen($ringColor, 2.8)
+    $unlockPen = New-Object System.Drawing.Pen($ringColor, 3.0)
+    $keyholeBrush = New-Object System.Drawing.SolidBrush($keyholeColor)
+    $nativeHandle = [IntPtr]::Zero
+    try {
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $graphics.Clear([System.Drawing.Color]::Transparent)
+
+        $bodyRect = New-Object System.Drawing.RectangleF 7, 14, 18, 12
+        $graphics.FillRectangle($bodyBrush, $bodyRect)
+        $graphics.DrawRectangle($outlinePen, $bodyRect.X, $bodyRect.Y, $bodyRect.Width, $bodyRect.Height)
+
+        if ($State -eq "locked") {
+            $graphics.DrawArc($ringPen, 8, 5, 16, 16, 180, 180)
+        } else {
+            $graphics.DrawArc($ringPen, 7, 6, 14, 14, 145, 160)
+            $graphics.DrawLine($unlockPen, 18, 7, 24, 11)
+            $graphics.DrawLine($unlockPen, 24, 11, 23, 18)
+        }
+
+        $graphics.FillEllipse($keyholeBrush, 14, 17, 4, 4)
+        $graphics.FillRectangle($keyholeBrush, 15, 20, 2, 5)
+
+        $nativeHandle = $bitmap.GetHicon()
+        $sourceIcon = [System.Drawing.Icon]::FromHandle($nativeHandle)
+        return [System.Drawing.Icon]$sourceIcon.Clone()
+    } finally {
+        if ($nativeHandle -ne [IntPtr]::Zero) {
+            $interop = "VaultXConsoleInterop" -as [type]
+            if ($null -ne $interop) {
+                try { $interop::DestroyIcon($nativeHandle) | Out-Null } catch { $null = $interop }
+            }
+        }
+        $keyholeBrush.Dispose()
+        $unlockPen.Dispose()
+        $ringPen.Dispose()
+        $outlinePen.Dispose()
+        $bodyBrush.Dispose()
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
+}
+
+function Get-GuiWindowIcon {
+    param(
+        [ValidateSet("locked", "unlocked")]
+        [string]$State,
+        [string]$Theme
+    )
+    if ($null -eq $script:GuiIconCache) {
+        $script:GuiIconCache = @{}
+    }
+    $normalizedTheme = if ([string]::IsNullOrWhiteSpace($Theme)) { Get-GuiThemeMode } else { $Theme.Trim().ToLowerInvariant() }
+    $key = "{0}:{1}" -f $normalizedTheme, $State
+    if (-not $script:GuiIconCache.ContainsKey($key)) {
+        $script:GuiIconCache[$key] = New-GuiWindowIcon -State $State -Theme $normalizedTheme
+    }
+    return $script:GuiIconCache[$key]
+}
+
+function Update-GuiWindowAppearance {
+    param($Entry)
+    if ($null -eq $Entry -or $null -eq $Entry.Form) { return }
+    $form = $Entry.Form
+    try {
+        if ($form.IsDisposed) { return }
+    } catch {
+        return
+    }
+    $theme = Get-GuiThemeMode
+    Set-GuiTheme -Control $form -Theme $theme
+    if ($null -ne $Entry.ThemeButton) {
+        try {
+            if (-not $Entry.ThemeButton.IsDisposed) {
+                $Entry.ThemeButton.Text = Get-GuiThemeButtonText -Theme $theme
+            }
+        } catch {
+            $null = $Entry.ThemeButton
+        }
+    }
+    $state = if ($Entry.Role -eq "launcher") { "locked" } else { "unlocked" }
+    $icon = Get-GuiWindowIcon -State $state -Theme $theme
+    if ($null -ne $icon) {
+        try { $form.Icon = $icon } catch { $null = $form }
+    }
+    Update-GuiWindowFrameStyle -Form $form -Theme $theme -Role $Entry.Role
+}
+
+function Register-GuiWindow {
+    param(
+        [System.Windows.Forms.Form]$Form,
+        [ValidateSet("launcher", "vault")]
+        [string]$Role,
+        [object]$ThemeButton,
+        [string]$VaultPath
+    )
+    if ($null -eq $Form) { return }
+    Sync-GuiWindowRegistry | Out-Null
+    Unregister-GuiWindow -Form $Form
+    $entry = [ordered]@{
+        Form = $Form
+        Role = $Role
+        ThemeButton = $ThemeButton
+        VaultPath = $VaultPath
+    }
+    $script:GuiWindowRegistry += ,$entry
+    Update-GuiWindowAppearance -Entry $entry
+}
+
+function Update-GuiWindows {
+    foreach ($entry in @(Sync-GuiWindowRegistry)) {
+        Update-GuiWindowAppearance -Entry $entry
     }
 }
 
@@ -4985,6 +5436,10 @@ function Open-VaultGui {
         [switch]$CreateIfMissing,
         [object]$Owner
     )
+    $cachedSession = Get-GuiVaultSession -VaultPath $VaultPath
+    if ($null -ne $cachedSession -and $null -ne $cachedSession.Vault) {
+        return $cachedSession.Vault
+    }
     if (-not (Test-Path $VaultPath)) {
         if (-not $CreateIfMissing) {
             Show-GuiMessage -Text "Vault not found." -Title "Open Vault" -Kind Error -Owner $Owner
@@ -5012,12 +5467,14 @@ function Open-VaultGui {
         }
         Save-Vault -VaultPath $VaultPath -Key $pair.EncKey -MacKey $pair.MacKey -Meta $meta -Data $data
         $password = $null
-        return @{
+        $vault = @{
             Meta = $meta
             Data = $data
             Key = $pair.EncKey
             MacKey = $pair.MacKey
         }
+        Set-GuiVaultSession -VaultPath $VaultPath -Vault $vault | Out-Null
+        return $vault
     }
 
     try {
@@ -5056,12 +5513,14 @@ function Open-VaultGui {
                 if (-not (Confirm-VaultTwoFactorGui -VaultPath $VaultPath -Meta $meta -Data $data -Key $pair.EncKey -MacKey $pair.MacKey -Owner $Owner)) {
                     return $null
                 }
-                return @{
+                $vault = @{
                     Meta = $meta
                     Data = $data
                     Key = $pair.EncKey
                     MacKey = $pair.MacKey
                 }
+                Set-GuiVaultSession -VaultPath $VaultPath -Vault $vault | Out-Null
+                return $vault
             } catch {
                 Show-GuiMessage -Text "Invalid password or vault corrupted." -Title $title -Kind Error -Owner $Owner
                 if (-not $recoveryAvailable) { continue }
@@ -5103,12 +5562,14 @@ function Open-VaultGui {
                 if (-not (Confirm-VaultTwoFactorGui -VaultPath $VaultPath -Meta $meta -Data $data -Key $recoveryPair.EncKey -MacKey $recoveryPair.MacKey -Owner $Owner)) {
                     return $null
                 }
-                return @{
+                $vault = @{
                     Meta = $meta
                     Data = $data
                     Key = $recoveryPair.EncKey
                     MacKey = $recoveryPair.MacKey
                 }
+                Set-GuiVaultSession -VaultPath $VaultPath -Vault $vault | Out-Null
+                return $vault
             } catch {
                 Show-GuiMessage -Text "Invalid recovery password or vault corrupted." -Title "Recovery Unlock" -Kind Error -Owner $Owner
                 $choice = Show-GuiChoiceDialog -Title "Recovery failed" -Message "Recovery unlock did not succeed." -Options @("Retry Recovery", "Back") -Owner $Owner
@@ -5118,6 +5579,50 @@ function Open-VaultGui {
             }
         }
     }
+}
+
+function Open-GuiVaultWindow {
+    param(
+        [string]$VaultPath,
+        [string]$AccountName,
+        $Vault,
+        [object]$LauncherForm
+    )
+    if ([string]::IsNullOrWhiteSpace($VaultPath)) { return $false }
+
+    $session = Get-GuiVaultSession -VaultPath $VaultPath
+    if ($null -ne $session) {
+        if ($null -eq $Vault -and $null -ne $session.Vault) {
+            $Vault = $session.Vault
+        }
+        if ($null -ne $session.Form) {
+            $existingForm = $session.Form
+            $isDisposed = $true
+            try {
+                $isDisposed = $existingForm.IsDisposed
+            } catch {
+                $isDisposed = $true
+            }
+            if (-not $isDisposed) {
+                Show-GuiForm -Form $existingForm
+                return $true
+            }
+            Set-GuiVaultSessionForm -VaultPath $VaultPath -Form $null
+        }
+    }
+
+    if ($null -eq $Vault) {
+        $Vault = Open-VaultGui -VaultPath $VaultPath -AccountName $AccountName -Owner $LauncherForm
+        if ($null -eq $Vault) { return $false }
+    }
+
+    Set-GuiVaultSession -VaultPath $VaultPath -Vault $Vault | Out-Null
+    $window = Show-VaultGui -VaultPath $VaultPath -Vault $Vault -LauncherForm $LauncherForm
+    if ($null -eq $window) { return $false }
+
+    Set-GuiVaultSessionForm -VaultPath $VaultPath -Form $window
+    Show-GuiForm -Form $window
+    return $true
 }
 
 function New-AccountGui {
@@ -5481,28 +5986,32 @@ function Show-VaultGui {
     param(
         [string]$VaultPath,
         $Vault,
-        [object]$Owner
+        [object]$LauncherForm
     )
-    if (-not (Initialize-GuiFramework)) { return }
-    if ([string]::IsNullOrWhiteSpace($VaultPath)) { return }
+    if (-not (Initialize-GuiFramework)) { return $null }
+    if ([string]::IsNullOrWhiteSpace($VaultPath)) { return $null }
 
     $vaultMeta = $Vault.Meta
     $vaultData = $Vault.Data
     $vaultKey = $Vault.Key
     $vaultMacKey = $Vault.MacKey
+    $launcherWindow = if ($null -ne $LauncherForm) { $LauncherForm } else { $script:GuiLauncherForm }
     if ($null -eq $vaultData.Entries) {
         $vaultData | Add-Member -NotePropertyName Entries -NotePropertyValue @() -Force
     }
     $state = [ordered]@{
         SelectedEntryId = $null
+        LockRequested = $false
     }
 
     $form = New-Object System.Windows.Forms.Form
     $title = if ($vaultMeta.AccountName) { "$script:AppName - $($vaultMeta.AccountName)" } else { "$script:AppName - Vault" }
     $form.Text = $title
-    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $form.ClientSize = New-Object System.Drawing.Size(1035, 610)
     $form.MinimumSize = New-Object System.Drawing.Size(1051, 649)
+    $form.ShowInTaskbar = $true
+    $form.MinimizeBox = $true
 
     $searchLabel = New-Object System.Windows.Forms.Label
     $searchLabel.Text = "Search"
@@ -5527,19 +6036,22 @@ function Show-VaultGui {
     $grid.ReadOnly = $true
     $grid.AllowUserToAddRows = $false
     $grid.AllowUserToDeleteRows = $false
+    $grid.AllowUserToResizeColumns = $false
     $grid.AllowUserToResizeRows = $false
     $grid.MultiSelect = $false
     $grid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
     $grid.RowHeadersVisible = $false
     $grid.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::None
+    $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $grid.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
     $form.Controls.Add($grid)
 
     $columns = @(
-        @{ Name = "EntryId"; Header = "EntryId"; Property = "EntryId"; Width = 5; Visible = $false }
-        @{ Name = "Title"; Header = "Name"; Property = "Title"; Width = 240; Visible = $true }
-        @{ Name = "Url"; Header = "URL"; Property = "Url"; Width = 260; Visible = $true }
-        @{ Name = "Username"; Header = "Username"; Property = "Username"; Width = 150; Visible = $true }
-        @{ Name = "UpdatedAt"; Header = "Updated"; Property = "UpdatedAt"; Width = 110; Visible = $true }
+        @{ Name = "EntryId"; Header = "EntryId"; Property = "EntryId"; Width = 5; Visible = $false; FillWeight = 1; MinimumWidth = 2 }
+        @{ Name = "Title"; Header = "Name"; Property = "Title"; Width = 240; Visible = $true; FillWeight = 34; MinimumWidth = 170 }
+        @{ Name = "Url"; Header = "URL"; Property = "Url"; Width = 260; Visible = $true; FillWeight = 38; MinimumWidth = 220 }
+        @{ Name = "Username"; Header = "Username"; Property = "Username"; Width = 150; Visible = $true; FillWeight = 18; MinimumWidth = 120 }
+        @{ Name = "UpdatedAt"; Header = "Updated"; Property = "UpdatedAt"; Width = 110; Visible = $true; FillWeight = 16; MinimumWidth = 110 }
     )
     foreach ($columnSpec in $columns) {
         $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
@@ -5549,6 +6061,11 @@ function Show-VaultGui {
         $column.Width = $columnSpec.Width
         $column.Visible = $columnSpec.Visible
         $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        $column.MinimumWidth = $columnSpec.MinimumWidth
+        if ($column.Visible) {
+            $column.AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
+            $column.FillWeight = $columnSpec.FillWeight
+        }
         [void]$grid.Columns.Add($column)
     }
 
@@ -5575,7 +6092,7 @@ function Show-VaultGui {
         $form.Controls.Add($button)
     }
 
-    $getSelectedEntry = {
+    $getSelectedEntry = ({
         $row = $null
         if ($null -ne $grid.CurrentRow -and $grid.CurrentRow.Index -ge 0) {
             $row = $grid.CurrentRow
@@ -5591,9 +6108,9 @@ function Show-VaultGui {
             }
         }
         return $null
-    }
+    }).GetNewClosure()
 
-    $refreshGrid = {
+    $refreshGrid = ({
         $filterResult = Get-FilteredEntries -Entries $vaultData.Entries -SearchTerm $searchBox.Text
         $entries = @($filterResult.Entries)
 
@@ -5637,34 +6154,28 @@ function Show-VaultGui {
             $grid.ClearSelection()
             $state.SelectedEntryId = $null
         }
-    }
+    }).GetNewClosure()
 
-    $applyTheme = {
-        $theme = Get-GuiThemeMode
-        $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
-        Set-GuiTheme -Control $form -Theme $theme
-    }
-
-    $grid.Add_SelectionChanged({
+    $grid.Add_SelectionChanged(({
         $entry = & $getSelectedEntry
         if ($null -ne $entry) {
             $state.SelectedEntryId = $entry.Id
         } else {
             $state.SelectedEntryId = $null
         }
-    })
-    $grid.Add_CellDoubleClick({
+    }).GetNewClosure())
+    $grid.Add_CellDoubleClick(({
         if ($null -ne (& $getSelectedEntry)) {
             $buttons["view"].PerformClick()
         }
-    })
-    $searchBox.Add_TextChanged({ & $refreshGrid })
-    $themeButton.Add_Click({
+    }).GetNewClosure())
+    $searchBox.Add_TextChanged(({ & $refreshGrid }).GetNewClosure())
+    $themeButton.Add_Click(({
         Switch-GuiThemeMode | Out-Null
-        & $applyTheme
-    })
+        Update-GuiWindows
+    }).GetNewClosure())
 
-    $buttons["add"].Add_Click({
+    $buttons["add"].Add_Click(({
         try {
             $newEntry = Show-GuiEntryEditor -Owner $form
             if ($null -ne $newEntry) {
@@ -5677,18 +6188,18 @@ function Show-VaultGui {
             Write-Log ("GUI add entry failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to add the entry." -Title $title -Kind Error -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["view"].Add_Click({
+    $buttons["view"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
             Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
             return
         }
         [void](Show-GuiEntryEditor -Existing $entry -ReadOnly -Owner $form)
-    })
+    }).GetNewClosure())
 
-    $buttons["edit"].Add_Click({
+    $buttons["edit"].Add_Click(({
         try {
             $entry = & $getSelectedEntry
             if ($null -eq $entry) {
@@ -5705,9 +6216,9 @@ function Show-VaultGui {
             Write-Log ("GUI edit entry failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to update the entry." -Title $title -Kind Error -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["delete"].Add_Click({
+    $buttons["delete"].Add_Click(({
         try {
             $entry = & $getSelectedEntry
             if ($null -eq $entry) {
@@ -5725,9 +6236,9 @@ function Show-VaultGui {
             Write-Log ("GUI delete entry failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to delete the entry." -Title $title -Kind Error -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["copy-user"].Add_Click({
+    $buttons["copy-user"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
             Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
@@ -5740,9 +6251,9 @@ function Show-VaultGui {
         if (-not (Set-ClipboardSafe -Value $entry.Username)) {
             Show-GuiMessage -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["copy-pass"].Add_Click({
+    $buttons["copy-pass"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
             Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
@@ -5755,18 +6266,18 @@ function Show-VaultGui {
         if (-not (Set-ClipboardSafe -Value $entry.Password)) {
             Show-GuiMessage -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["open-url"].Add_Click({
+    $buttons["open-url"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
             Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
             return
         }
         Open-WebUrlGui -Url $entry.Url -Owner $form
-    })
+    }).GetNewClosure())
 
-    $buttons["import-csv"].Add_Click({
+    $buttons["import-csv"].Add_Click(({
         try {
             $result = Import-CsvEntriesGui -Entries $vaultData.Entries -Owner $form
             if ($null -ne $result -and $result.Imported -gt 0) {
@@ -5781,48 +6292,60 @@ function Show-VaultGui {
             Write-Log ("GUI CSV import failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to import the CSV file." -Title $title -Kind Error -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["export"].Add_Click({
+    $buttons["export"].Add_Click(({
         try {
             Export-VaultDataGui -AccountName $vaultMeta.AccountName -VaultData $vaultData -VaultMeta $vaultMeta -VaultPath $VaultPath -VaultKey $vaultKey -VaultMacKey $vaultMacKey -Owner $form | Out-Null
         } catch {
             Write-Log ("GUI export failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to export the vault." -Title $title -Kind Error -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["twofactor"].Add_Click({
+    $buttons["twofactor"].Add_Click(({
         try {
             Show-GuiTwoFactorSettings -VaultPath $VaultPath -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
         } catch {
             Write-Log ("GUI 2FA settings failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to open 2FA settings." -Title $title -Kind Error -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["recovery"].Add_Click({
+    $buttons["recovery"].Add_Click(({
         try {
             Show-GuiRecoverySettings -VaultPath $VaultPath -AccountName $vaultMeta.AccountName -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
         } catch {
             Write-Log ("GUI recovery settings failed: {0}" -f $_.Exception.Message)
             Show-GuiMessage -Text "Unable to open recovery settings." -Title $title -Kind Error -Owner $form
         }
-    })
+    }).GetNewClosure())
 
-    $buttons["lock"].Add_Click({
+    $buttons["lock"].Add_Click(({
+        $state.LockRequested = $true
         $form.Close()
-    })
+    }).GetNewClosure())
 
-    $form.Add_Shown({
-        & $applyTheme
+    Register-GuiWindow -Form $form -Role "vault" -ThemeButton $themeButton -VaultPath $VaultPath
+    $form.Add_FormClosed(({
+        Unregister-GuiWindow -Form $form
+        if ($state.LockRequested) {
+            Clear-GuiVaultSession -VaultPath $VaultPath
+            if ($null -ne $launcherWindow) {
+                Show-GuiForm -Form $launcherWindow
+            } else {
+                Show-GuiLauncherForm
+            }
+        } else {
+            Set-GuiVaultSessionForm -VaultPath $VaultPath -Form $null
+        }
+    }).GetNewClosure())
+    $form.Add_Shown(({
+        Update-GuiWindows
         & $refreshGrid
-    })
-    if ($null -ne $Owner) {
-        [void]$form.ShowDialog($Owner)
-    } else {
-        [void]$form.ShowDialog()
-    }
+    }).GetNewClosure())
+    [void]$form.Show()
+    return $form
 }
 
 function Start-VaultXGui {
@@ -5844,6 +6367,9 @@ function Start-VaultXGui {
         $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
         $form.ClientSize = New-Object System.Drawing.Size(760, 420)
         $form.MinimumSize = New-Object System.Drawing.Size(776, 459)
+        $form.ShowInTaskbar = $true
+        $form.MinimizeBox = $true
+        $script:GuiLauncherForm = $form
 
         $titleLabel = New-Object System.Windows.Forms.Label
         $titleLabel.Text = "$script:AppName GUI"
@@ -5920,12 +6446,6 @@ function Start-VaultXGui {
             return $state.Accounts[$vaultList.SelectedIndex]
         }
 
-        $applyTheme = {
-            $theme = Get-GuiThemeMode
-            $themeButton.Text = if ($theme -eq "dark") { "Theme: Dark" } else { "Theme: Light" }
-            Set-GuiTheme -Control $form -Theme $theme
-        }
-
         $openSelectedVault = {
             try {
                 $account = & $getSelectedAccount
@@ -5934,11 +6454,8 @@ function Start-VaultXGui {
                     return
                 }
                 $vaultPath = Get-VaultPath -FileName $account.File
-                $vault = Open-VaultGui -VaultPath $vaultPath -AccountName $account.Name -Owner $form
-                if ($null -ne $vault) {
-                    Show-VaultGui -VaultPath $vaultPath -Vault $vault -Owner $form
-                    & $refreshAccounts
-                }
+                Open-GuiVaultWindow -VaultPath $vaultPath -AccountName $account.Name -LauncherForm $form | Out-Null
+                & $refreshAccounts
             } catch {
                 Write-Log ("GUI open vault failed: {0}" -f $_.Exception.Message)
                 Show-GuiMessage -Text "Unable to open the selected vault." -Title $form.Text -Kind Error -Owner $form
@@ -5949,7 +6466,7 @@ function Start-VaultXGui {
         $vaultList.Add_DoubleClick({ & $openSelectedVault })
         $themeButton.Add_Click({
             Switch-GuiThemeMode | Out-Null
-            & $applyTheme
+            Update-GuiWindows
         })
 
         $buttons["create"].Add_Click({
@@ -5960,7 +6477,7 @@ function Start-VaultXGui {
                 & $refreshAccounts
                 if ($null -ne $created.Account) {
                     $vaultPath = Get-VaultPath -FileName $created.Account.File
-                    Show-VaultGui -VaultPath $vaultPath -Vault $created.Vault -Owner $form
+                    Open-GuiVaultWindow -VaultPath $vaultPath -AccountName $created.Account.Name -Vault $created.Vault -LauncherForm $form | Out-Null
                     & $refreshAccounts
                 }
             } catch {
@@ -5993,6 +6510,17 @@ function Start-VaultXGui {
                 if (-not (Show-GuiConfirm -Text ("Delete vault '{0}' and its data? This cannot be undone." -f $account.Name) -Title "Remove Vault" -Owner $form)) {
                     return
                 }
+                $session = Get-GuiVaultSession -VaultPath $vaultPath
+                if ($null -ne $session -and $null -ne $session.Form) {
+                    try {
+                        if (-not $session.Form.IsDisposed) {
+                            $session.Form.Close()
+                        }
+                    } catch {
+                        $null = $session
+                    }
+                }
+                Clear-GuiVaultSession -VaultPath $vaultPath
                 if (Test-Path $vaultPath) {
                     Remove-Item -Path $vaultPath -Force
                 }
@@ -6027,12 +6555,35 @@ function Start-VaultXGui {
 
         $buttons["terminal"].Add_Click({ $form.Close() })
 
+        Register-GuiWindow -Form $form -Role "launcher" -ThemeButton $themeButton
+        $form.Add_FormClosing(({
+            foreach ($session in @($script:GuiVaultSessions.Values)) {
+                $window = $session.Form
+                if ($null -eq $window) { continue }
+                try {
+                    if (-not $window.IsDisposed) {
+                        $window.Close()
+                    }
+                } catch {
+                    $null = $window
+                }
+            }
+        }).GetNewClosure())
+        $form.Add_FormClosed(({
+            Unregister-GuiWindow -Form $form
+            if ($script:GuiLauncherForm -eq $form) {
+                $script:GuiLauncherForm = $null
+            }
+            Stop-GuiClipboardAutoClearTimer
+        }).GetNewClosure())
         $form.Add_Shown({
-            & $applyTheme
+            Update-GuiWindows
             & $refreshAccounts
         })
         [void]$form.ShowDialog()
     } finally {
+        $script:GuiLauncherForm = $null
+        Stop-GuiClipboardAutoClearTimer
         if ($consoleHidden) {
             Set-ConsoleWindowVisible -Visible:$true | Out-Null
         }
