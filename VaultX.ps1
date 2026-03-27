@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script:AppName = "VaultX"
-$script:AppVersion = "1.0.3"
+$script:AppVersion = "1.0.4"
 $script:UpdateConfigUrl = "https://raw.githubusercontent.com/CedrickGD/Vault-X/main/version.yml"
 $script:UpdateCheckEnabled = ($env:VAULTX_UPDATE_CHECK -ne "0")
 $script:SkipShellOnQuit = $false
@@ -1846,6 +1846,8 @@ function Start-GuiClipboardAutoClearTimer {
 
     Stop-GuiClipboardAutoClearTimer
     $script:GuiClipboardAutoClearTarget = $ExpectedValue
+    $writeLogCommand = (Get-Command Write-Log -CommandType Function).ScriptBlock
+    $stopGuiClipboardAutoClearTimerCommand = (Get-Command Stop-GuiClipboardAutoClearTimer -CommandType Function).ScriptBlock
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = [Math]::Max(250, ($script:ClipboardAutoClearSeconds * 1000))
@@ -1859,9 +1861,9 @@ function Start-GuiClipboardAutoClearTimer {
                 [System.Windows.Forms.Clipboard]::SetText("")
             }
         } catch {
-            Write-Log ("GUI clipboard auto-clear failed: {0}" -f $_.Exception.Message)
+            & $writeLogCommand ("GUI clipboard auto-clear failed: {0}" -f $_.Exception.Message)
         } finally {
-            Stop-GuiClipboardAutoClearTimer
+            & $stopGuiClipboardAutoClearTimerCommand
         }
     }).GetNewClosure())
     $script:GuiClipboardAutoClearTimer = $timer
@@ -4164,6 +4166,17 @@ function Start-InteractiveShellOnQuit {
     }
 }
 
+function Start-InteractiveShellAfterGui {
+    if ($script:IsDotSourced) { return }
+    if (-not $script:LaunchedFromFile) { return }
+    if ($Host.Name -ne "ConsoleHost") { return }
+    try {
+        & powershell.exe -NoExit
+    } catch {
+        Write-Log ("Interactive shell after GUI failed: {0}" -f $_.Exception.Message)
+    }
+}
+
 function Register-VaultXSession {
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) { return }
@@ -4195,6 +4208,10 @@ public static class VaultXConsoleInterop
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -4254,6 +4271,22 @@ function Set-ConsoleWindowVisible {
     if ($handle -eq [IntPtr]::Zero) { return $false }
     $mode = if ($Visible) { 5 } else { 0 }
     return $interop::ShowWindow($handle, $mode)
+}
+
+function Restore-ConsoleWindow {
+    if (-not (Initialize-ConsoleWindowInterop)) { return $false }
+    $interop = "VaultXConsoleInterop" -as [type]
+    if ($null -eq $interop) { return $false }
+    $handle = $interop::GetConsoleWindow()
+    if ($handle -eq [IntPtr]::Zero) { return $false }
+    try {
+        $interop::ShowWindow($handle, 9) | Out-Null
+        $interop::SetForegroundWindow($handle) | Out-Null
+        return $true
+    } catch {
+        Write-Log ("Console restore failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
 }
 
 function Get-GuiThemePalette {
@@ -4584,6 +4617,21 @@ function Show-GuiForm {
 function Show-GuiLauncherForm {
     if ($null -eq $script:GuiLauncherForm) { return }
     Show-GuiForm -Form $script:GuiLauncherForm
+}
+
+function Close-AllGuiWindows {
+    param([object]$ExcludeForm)
+    foreach ($entry in @(Sync-GuiWindowRegistry)) {
+        $window = $entry.Form
+        if ($null -eq $window -or $window -eq $ExcludeForm) { continue }
+        try {
+            if (-not $window.IsDisposed) {
+                $window.Close()
+            }
+        } catch {
+            $null = $window
+        }
+    }
 }
 
 function New-GuiWindowIcon {
@@ -6003,6 +6051,26 @@ function Show-VaultGui {
         SelectedEntryId = $null
         LockRequested = $false
     }
+    # Capture script-scope functions so WinForms closures do not lose them.
+    $getFilteredEntriesCommand = (Get-Command Get-FilteredEntries -CommandType Function).ScriptBlock
+    $switchGuiThemeModeCommand = (Get-Command Switch-GuiThemeMode -CommandType Function).ScriptBlock
+    $updateGuiWindowsCommand = (Get-Command Update-GuiWindows -CommandType Function).ScriptBlock
+    $showGuiEntryEditorCommand = (Get-Command Show-GuiEntryEditor -CommandType Function).ScriptBlock
+    $saveVaultCommand = (Get-Command Save-Vault -CommandType Function).ScriptBlock
+    $writeLogCommand = (Get-Command Write-Log -CommandType Function).ScriptBlock
+    $showGuiMessageCommand = (Get-Command Show-GuiMessage -CommandType Function).ScriptBlock
+    $showGuiConfirmCommand = (Get-Command Show-GuiConfirm -CommandType Function).ScriptBlock
+    $setClipboardSafeCommand = (Get-Command Set-ClipboardSafe -CommandType Function).ScriptBlock
+    $openWebUrlGuiCommand = (Get-Command Open-WebUrlGui -CommandType Function).ScriptBlock
+    $importCsvEntriesGuiCommand = (Get-Command Import-CsvEntriesGui -CommandType Function).ScriptBlock
+    $exportVaultDataGuiCommand = (Get-Command Export-VaultDataGui -CommandType Function).ScriptBlock
+    $showGuiTwoFactorSettingsCommand = (Get-Command Show-GuiTwoFactorSettings -CommandType Function).ScriptBlock
+    $showGuiRecoverySettingsCommand = (Get-Command Show-GuiRecoverySettings -CommandType Function).ScriptBlock
+    $unregisterGuiWindowCommand = (Get-Command Unregister-GuiWindow -CommandType Function).ScriptBlock
+    $clearGuiVaultSessionCommand = (Get-Command Clear-GuiVaultSession -CommandType Function).ScriptBlock
+    $showGuiFormCommand = (Get-Command Show-GuiForm -CommandType Function).ScriptBlock
+    $showGuiLauncherFormCommand = (Get-Command Show-GuiLauncherForm -CommandType Function).ScriptBlock
+    $setGuiVaultSessionFormCommand = (Get-Command Set-GuiVaultSessionForm -CommandType Function).ScriptBlock
 
     $form = New-Object System.Windows.Forms.Form
     $title = if ($vaultMeta.AccountName) { "$script:AppName - $($vaultMeta.AccountName)" } else { "$script:AppName - Vault" }
@@ -6111,7 +6179,7 @@ function Show-VaultGui {
     }).GetNewClosure()
 
     $refreshGrid = ({
-        $filterResult = Get-FilteredEntries -Entries $vaultData.Entries -SearchTerm $searchBox.Text
+        $filterResult = & $getFilteredEntriesCommand -Entries $vaultData.Entries -SearchTerm $searchBox.Text
         $entries = @($filterResult.Entries)
 
         $table = New-Object System.Data.DataTable
@@ -6171,50 +6239,50 @@ function Show-VaultGui {
     }).GetNewClosure())
     $searchBox.Add_TextChanged(({ & $refreshGrid }).GetNewClosure())
     $themeButton.Add_Click(({
-        Switch-GuiThemeMode | Out-Null
-        Update-GuiWindows
+        & $switchGuiThemeModeCommand | Out-Null
+        & $updateGuiWindowsCommand
     }).GetNewClosure())
 
     $buttons["add"].Add_Click(({
         try {
-            $newEntry = Show-GuiEntryEditor -Owner $form
+            $newEntry = & $showGuiEntryEditorCommand -Owner $form
             if ($null -ne $newEntry) {
                 $vaultData.Entries += $newEntry
-                Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+                & $saveVaultCommand -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
                 $state.SelectedEntryId = $newEntry.Id
                 & $refreshGrid
             }
         } catch {
-            Write-Log ("GUI add entry failed: {0}" -f $_.Exception.Message)
-            Show-GuiMessage -Text "Unable to add the entry." -Title $title -Kind Error -Owner $form
+            & $writeLogCommand ("GUI add entry failed: {0}" -f $_.Exception.Message)
+            & $showGuiMessageCommand -Text "Unable to add the entry." -Title $title -Kind Error -Owner $form
         }
     }).GetNewClosure())
 
     $buttons["view"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
-            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            & $showGuiMessageCommand -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
             return
         }
-        [void](Show-GuiEntryEditor -Existing $entry -ReadOnly -Owner $form)
+        [void](& $showGuiEntryEditorCommand -Existing $entry -ReadOnly -Owner $form)
     }).GetNewClosure())
 
     $buttons["edit"].Add_Click(({
         try {
             $entry = & $getSelectedEntry
             if ($null -eq $entry) {
-                Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+                & $showGuiMessageCommand -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
                 return
             }
-            $updated = Show-GuiEntryEditor -Existing $entry -Owner $form
+            $updated = & $showGuiEntryEditorCommand -Existing $entry -Owner $form
             if ($null -ne $updated) {
-                Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+                & $saveVaultCommand -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
                 $state.SelectedEntryId = $updated.Id
                 & $refreshGrid
             }
         } catch {
-            Write-Log ("GUI edit entry failed: {0}" -f $_.Exception.Message)
-            Show-GuiMessage -Text "Unable to update the entry." -Title $title -Kind Error -Owner $form
+            & $writeLogCommand ("GUI edit entry failed: {0}" -f $_.Exception.Message)
+            & $showGuiMessageCommand -Text "Unable to update the entry." -Title $title -Kind Error -Owner $form
         }
     }).GetNewClosure())
 
@@ -6222,102 +6290,102 @@ function Show-VaultGui {
         try {
             $entry = & $getSelectedEntry
             if ($null -eq $entry) {
-                Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+                & $showGuiMessageCommand -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
                 return
             }
-            if (-not (Show-GuiConfirm -Text ("Delete '{0}'?" -f $entry.Title) -Title "Delete Entry" -Owner $form)) {
+            if (-not (& $showGuiConfirmCommand -Text ("Delete '{0}'?" -f $entry.Title) -Title "Delete Entry" -Owner $form)) {
                 return
             }
             $vaultData.Entries = @($vaultData.Entries | Where-Object { $_.Id -ne $entry.Id })
-            Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+            & $saveVaultCommand -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
             $state.SelectedEntryId = $null
             & $refreshGrid
         } catch {
-            Write-Log ("GUI delete entry failed: {0}" -f $_.Exception.Message)
-            Show-GuiMessage -Text "Unable to delete the entry." -Title $title -Kind Error -Owner $form
+            & $writeLogCommand ("GUI delete entry failed: {0}" -f $_.Exception.Message)
+            & $showGuiMessageCommand -Text "Unable to delete the entry." -Title $title -Kind Error -Owner $form
         }
     }).GetNewClosure())
 
     $buttons["copy-user"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
-            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            & $showGuiMessageCommand -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
             return
         }
         if ([string]::IsNullOrWhiteSpace($entry.Username)) {
-            Show-GuiMessage -Text "The selected entry has no username." -Title $title -Kind Warning -Owner $form
+            & $showGuiMessageCommand -Text "The selected entry has no username." -Title $title -Kind Warning -Owner $form
             return
         }
-        if (-not (Set-ClipboardSafe -Value $entry.Username)) {
-            Show-GuiMessage -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
+        if (-not (& $setClipboardSafeCommand -Value $entry.Username)) {
+            & $showGuiMessageCommand -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
         }
     }).GetNewClosure())
 
     $buttons["copy-pass"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
-            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            & $showGuiMessageCommand -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
             return
         }
         if ([string]::IsNullOrWhiteSpace($entry.Password)) {
-            Show-GuiMessage -Text "The selected entry has no password." -Title $title -Kind Warning -Owner $form
+            & $showGuiMessageCommand -Text "The selected entry has no password." -Title $title -Kind Warning -Owner $form
             return
         }
-        if (-not (Set-ClipboardSafe -Value $entry.Password)) {
-            Show-GuiMessage -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
+        if (-not (& $setClipboardSafeCommand -Value $entry.Password)) {
+            & $showGuiMessageCommand -Text "Clipboard is not available in this session." -Title $title -Kind Warning -Owner $form
         }
     }).GetNewClosure())
 
     $buttons["open-url"].Add_Click(({
         $entry = & $getSelectedEntry
         if ($null -eq $entry) {
-            Show-GuiMessage -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
+            & $showGuiMessageCommand -Text "Select an entry first." -Title $title -Kind Warning -Owner $form
             return
         }
-        Open-WebUrlGui -Url $entry.Url -Owner $form
+        & $openWebUrlGuiCommand -Url $entry.Url -Owner $form
     }).GetNewClosure())
 
     $buttons["import-csv"].Add_Click(({
         try {
-            $result = Import-CsvEntriesGui -Entries $vaultData.Entries -Owner $form
+            $result = & $importCsvEntriesGuiCommand -Entries $vaultData.Entries -Owner $form
             if ($null -ne $result -and $result.Imported -gt 0) {
                 $vaultData.Entries = $result.Entries
-                Save-Vault -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
+                & $saveVaultCommand -VaultPath $VaultPath -Key $vaultKey -MacKey $vaultMacKey -Meta $vaultMeta -Data $vaultData
                 if ($vaultData.Entries.Count -gt 0) {
                     $state.SelectedEntryId = $vaultData.Entries[-1].Id
                 }
                 & $refreshGrid
             }
         } catch {
-            Write-Log ("GUI CSV import failed: {0}" -f $_.Exception.Message)
-            Show-GuiMessage -Text "Unable to import the CSV file." -Title $title -Kind Error -Owner $form
+            & $writeLogCommand ("GUI CSV import failed: {0}" -f $_.Exception.Message)
+            & $showGuiMessageCommand -Text "Unable to import the CSV file." -Title $title -Kind Error -Owner $form
         }
     }).GetNewClosure())
 
     $buttons["export"].Add_Click(({
         try {
-            Export-VaultDataGui -AccountName $vaultMeta.AccountName -VaultData $vaultData -VaultMeta $vaultMeta -VaultPath $VaultPath -VaultKey $vaultKey -VaultMacKey $vaultMacKey -Owner $form | Out-Null
+            & $exportVaultDataGuiCommand -AccountName $vaultMeta.AccountName -VaultData $vaultData -VaultMeta $vaultMeta -VaultPath $VaultPath -VaultKey $vaultKey -VaultMacKey $vaultMacKey -Owner $form | Out-Null
         } catch {
-            Write-Log ("GUI export failed: {0}" -f $_.Exception.Message)
-            Show-GuiMessage -Text "Unable to export the vault." -Title $title -Kind Error -Owner $form
+            & $writeLogCommand ("GUI export failed: {0}" -f $_.Exception.Message)
+            & $showGuiMessageCommand -Text "Unable to export the vault." -Title $title -Kind Error -Owner $form
         }
     }).GetNewClosure())
 
     $buttons["twofactor"].Add_Click(({
         try {
-            Show-GuiTwoFactorSettings -VaultPath $VaultPath -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
+            & $showGuiTwoFactorSettingsCommand -VaultPath $VaultPath -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
         } catch {
-            Write-Log ("GUI 2FA settings failed: {0}" -f $_.Exception.Message)
-            Show-GuiMessage -Text "Unable to open 2FA settings." -Title $title -Kind Error -Owner $form
+            & $writeLogCommand ("GUI 2FA settings failed: {0}" -f $_.Exception.Message)
+            & $showGuiMessageCommand -Text "Unable to open 2FA settings." -Title $title -Kind Error -Owner $form
         }
     }).GetNewClosure())
 
     $buttons["recovery"].Add_Click(({
         try {
-            Show-GuiRecoverySettings -VaultPath $VaultPath -AccountName $vaultMeta.AccountName -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
+            & $showGuiRecoverySettingsCommand -VaultPath $VaultPath -AccountName $vaultMeta.AccountName -Meta $vaultMeta -Data $vaultData -Key $vaultKey -MacKey $vaultMacKey -Owner $form | Out-Null
         } catch {
-            Write-Log ("GUI recovery settings failed: {0}" -f $_.Exception.Message)
-            Show-GuiMessage -Text "Unable to open recovery settings." -Title $title -Kind Error -Owner $form
+            & $writeLogCommand ("GUI recovery settings failed: {0}" -f $_.Exception.Message)
+            & $showGuiMessageCommand -Text "Unable to open recovery settings." -Title $title -Kind Error -Owner $form
         }
     }).GetNewClosure())
 
@@ -6328,20 +6396,20 @@ function Show-VaultGui {
 
     Register-GuiWindow -Form $form -Role "vault" -ThemeButton $themeButton -VaultPath $VaultPath
     $form.Add_FormClosed(({
-        Unregister-GuiWindow -Form $form
+        & $unregisterGuiWindowCommand -Form $form
         if ($state.LockRequested) {
-            Clear-GuiVaultSession -VaultPath $VaultPath
+            & $clearGuiVaultSessionCommand -VaultPath $VaultPath
             if ($null -ne $launcherWindow) {
-                Show-GuiForm -Form $launcherWindow
+                & $showGuiFormCommand -Form $launcherWindow
             } else {
-                Show-GuiLauncherForm
+                & $showGuiLauncherFormCommand
             }
         } else {
-            Set-GuiVaultSessionForm -VaultPath $VaultPath -Form $null
+            & $setGuiVaultSessionFormCommand -VaultPath $VaultPath -Form $null
         }
     }).GetNewClosure())
     $form.Add_Shown(({
-        Update-GuiWindows
+        & $updateGuiWindowsCommand
         & $refreshGrid
     }).GetNewClosure())
     [void]$form.Show()
@@ -6352,15 +6420,21 @@ function Start-VaultXGui {
     param([array]$Accounts)
     if (-not (Initialize-GuiFramework)) {
         Show-Message "GUI mode requires a Windows desktop session with STA PowerShell." ([ConsoleColor]::Red)
-        return @{ Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts); Quit = $false }
+        return @{ Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts); Quit = $false; ReturnToTerminal = $false }
     }
 
     $state = [ordered]@{
         Accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
+        ReturnToTerminal = $false
     }
-    $consoleHidden = $false
+    $switchGuiThemeModeCommand = (Get-Command Switch-GuiThemeMode -CommandType Function).ScriptBlock
+    $unregisterGuiWindowCommand = (Get-Command Unregister-GuiWindow -CommandType Function).ScriptBlock
+    $stopGuiClipboardAutoClearTimerCommand = (Get-Command Stop-GuiClipboardAutoClearTimer -CommandType Function).ScriptBlock
+    $updateGuiWindowsCommand = (Get-Command Update-GuiWindows -CommandType Function).ScriptBlock
+    $closeAllGuiWindowsCommand = (Get-Command Close-AllGuiWindows -CommandType Function).ScriptBlock
+    $restoreConsoleWindowCommand = (Get-Command Restore-ConsoleWindow -CommandType Function).ScriptBlock
     try {
-        $consoleHidden = Set-ConsoleWindowVisible -Visible:$false
+        Set-ConsoleWindowVisible -Visible:$false | Out-Null
 
         $form = New-Object System.Windows.Forms.Form
         $form.Text = "$script:AppName GUI"
@@ -6465,8 +6539,8 @@ function Start-VaultXGui {
         $buttons["open"].Add_Click({ & $openSelectedVault })
         $vaultList.Add_DoubleClick({ & $openSelectedVault })
         $themeButton.Add_Click({
-            Switch-GuiThemeMode | Out-Null
-            Update-GuiWindows
+            & $switchGuiThemeModeCommand | Out-Null
+            & $updateGuiWindowsCommand
         })
 
         $buttons["create"].Add_Click({
@@ -6553,46 +6627,39 @@ function Start-VaultXGui {
             }
         })
 
-        $buttons["terminal"].Add_Click({ $form.Close() })
+        $buttons["terminal"].Add_Click({
+            $state.ReturnToTerminal = $true
+            $form.Close()
+        })
 
         Register-GuiWindow -Form $form -Role "launcher" -ThemeButton $themeButton
         $form.Add_FormClosing(({
-            foreach ($session in @($script:GuiVaultSessions.Values)) {
-                $window = $session.Form
-                if ($null -eq $window) { continue }
-                try {
-                    if (-not $window.IsDisposed) {
-                        $window.Close()
-                    }
-                } catch {
-                    $null = $window
-                }
-            }
+            $state.ReturnToTerminal = $true
+            & $closeAllGuiWindowsCommand -ExcludeForm $form
         }).GetNewClosure())
         $form.Add_FormClosed(({
-            Unregister-GuiWindow -Form $form
+            & $unregisterGuiWindowCommand -Form $form
             if ($script:GuiLauncherForm -eq $form) {
                 $script:GuiLauncherForm = $null
             }
-            Stop-GuiClipboardAutoClearTimer
+            & $stopGuiClipboardAutoClearTimerCommand
+            & $restoreConsoleWindowCommand | Out-Null
         }).GetNewClosure())
         $form.Add_Shown({
-            Update-GuiWindows
+            & $updateGuiWindowsCommand
             & $refreshAccounts
         })
         [void]$form.ShowDialog()
     } finally {
         $script:GuiLauncherForm = $null
         Stop-GuiClipboardAutoClearTimer
-        if ($consoleHidden) {
-            Set-ConsoleWindowVisible -Visible:$true | Out-Null
-        }
-        Clear-Host
+        Restore-ConsoleWindow | Out-Null
     }
 
     return @{
         Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts)
         Quit = $false
+        ReturnToTerminal = [bool]$state.ReturnToTerminal
     }
 }
 
@@ -6703,6 +6770,8 @@ if ($Gui) {
     $guiResult = Start-VaultXGui -Accounts (Get-Accounts)
     if ($null -ne $guiResult -and $guiResult.Quit) {
         Close-VaultX -Message "$script:AppName closed."
+    } elseif ($null -ne $guiResult -and $guiResult.ReturnToTerminal) {
+        Start-InteractiveShellAfterGui
     }
     return
 }
