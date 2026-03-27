@@ -13,9 +13,26 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script:AppName = "VaultX"
-$script:AppVersion = "1.0.4"
+$script:AppVersion = "1.0.5"
+$script:UpdateReleaseApiUrl = "https://api.github.com/repos/CedrickGD/Vault-X/releases/latest"
 $script:UpdateConfigUrl = "https://raw.githubusercontent.com/CedrickGD/Vault-X/main/version.yml"
 $script:UpdateCheckEnabled = ($env:VAULTX_UPDATE_CHECK -ne "0")
+$script:UpdateState = [pscustomobject][ordered]@{
+    Checked = $false
+    Available = $false
+    CurrentVersion = $null
+    LatestVersion = $null
+    DownloadUrl = $null
+    ReleaseUrl = $null
+    ChangelogUrl = $null
+    Mandatory = $false
+    CanAutoInstall = $false
+    Mode = "none"
+    PromptPending = $false
+    PromptShown = $false
+    StatusText = $null
+}
+$script:UpdateInstalledOnExit = $false
 $script:SkipShellOnQuit = $false
 $script:MenuNormalColor = [ConsoleColor]::Gray
 $script:MenuHighlightColor = [ConsoleColor]::Cyan
@@ -294,6 +311,26 @@ function Convert-UpdateConfigText {
     return $result
 }
 
+function Reset-UpdateState {
+    $script:UpdateState = [pscustomobject][ordered]@{
+        Checked = $false
+        Available = $false
+        CurrentVersion = ConvertTo-VersionString -Value $script:AppVersion
+        LatestVersion = $null
+        DownloadUrl = $null
+        ReleaseUrl = $null
+        ChangelogUrl = $null
+        Mandatory = $false
+        CanAutoInstall = $false
+        Mode = "none"
+        PromptPending = $false
+        PromptShown = $false
+        StatusText = $null
+    }
+    $script:UpdateInstalledOnExit = $false
+    return $script:UpdateState
+}
+
 function ConvertTo-VersionString {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
@@ -342,11 +379,19 @@ function Test-IsDevelopmentCopy {
     return (Test-Path (Join-Path $root ".git"))
 }
 
+function Get-UpdateRequestHeaders {
+    $versionText = if ([string]::IsNullOrWhiteSpace($script:AppVersion)) { "unknown" } else { $script:AppVersion }
+    return @{
+        "User-Agent" = ("{0}/{1}" -f $script:AppName, $versionText)
+        "Accept" = "application/vnd.github+json"
+    }
+}
+
 function Test-UpdateDownloadUrl {
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
     try {
-        $response = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -ErrorAction Stop
+        $response = Invoke-WebRequest -Uri $Url -Method Head -Headers (Get-UpdateRequestHeaders) -UseBasicParsing -ErrorAction Stop
         if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) { return $true }
     } catch {
         $status = $null
@@ -359,6 +404,72 @@ function Test-UpdateDownloadUrl {
         return $false
     }
     return $false
+}
+
+function Get-UpdateAssetUrlFromRelease {
+    param($Release)
+    if ($null -eq $Release -or $null -eq $Release.assets) { return $null }
+    $assets = @($Release.assets)
+    $asset = @($assets | Where-Object { $_.name -eq "VaultX.ps1" } | Select-Object -First 1)
+    if ($null -eq $asset -or $asset.Count -eq 0) {
+        $asset = @($assets | Where-Object { $_.name -like "*.ps1" } | Select-Object -First 1)
+    }
+    if ($null -eq $asset -or $asset.Count -eq 0) { return $null }
+    return $asset[0].browser_download_url
+}
+
+function Convert-GitHubReleaseToUpdateInfo {
+    param($Release)
+    if ($null -eq $Release) { return $null }
+    $version = if (-not [string]::IsNullOrWhiteSpace($Release.tag_name)) { $Release.tag_name } else { $Release.name }
+    if ([string]::IsNullOrWhiteSpace($version)) { return $null }
+    $releaseUrl = $Release.html_url
+    return [ordered]@{
+        Version = $version
+        Url = Get-UpdateAssetUrlFromRelease -Release $Release
+        Changelog = $releaseUrl
+        ReleaseUrl = $releaseUrl
+        Mandatory = $false
+        Args = $null
+    }
+}
+
+function Get-RemoteUpdateInfo {
+    if (-not $script:UpdateCheckEnabled) { return $null }
+    if (Test-IsDevelopmentCopy) { return $null }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    } catch {
+        Write-Log ("TLS 1.2 setup failed: {0}" -f $_.Exception.Message)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($script:UpdateReleaseApiUrl)) {
+        try {
+            $response = Invoke-WebRequest -Uri $script:UpdateReleaseApiUrl -Headers (Get-UpdateRequestHeaders) -UseBasicParsing -ErrorAction Stop
+            $release = ConvertFrom-JsonSafe -Json $response.Content -Depth 12
+            $info = Convert-GitHubReleaseToUpdateInfo -Release $release
+            if ($null -ne $info) {
+                return $info
+            }
+        } catch {
+            Write-Log ("GitHub release check failed: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:UpdateConfigUrl)) { return $null }
+    try {
+        $response = Invoke-WebRequest -Uri $script:UpdateConfigUrl -Headers (Get-UpdateRequestHeaders) -UseBasicParsing -ErrorAction Stop
+        $info = Convert-UpdateConfigText -Text $response.Content
+        if ($null -ne $info) {
+            if ([string]::IsNullOrWhiteSpace($info.ReleaseUrl)) {
+                $info.ReleaseUrl = $info.Changelog
+            }
+            return $info
+        }
+    } catch {
+        Write-Log ("Update manifest fallback failed: {0}" -f $_.Exception.Message)
+    }
+    return $null
 }
 
 function Compare-VersionString {
@@ -379,31 +490,40 @@ function Compare-VersionString {
 function Install-Update {
     param(
         [string]$DownloadUrl,
-        [string]$LatestVersion
+        [string]$LatestVersion,
+        [switch]$Silent
     )
     if ([string]::IsNullOrWhiteSpace($DownloadUrl)) { return $null }
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) {
-        Show-Message "Update failed: script path unavailable." ([ConsoleColor]::Red)
+        if (-not $Silent) {
+            Show-Message "Update failed: script path unavailable." ([ConsoleColor]::Red)
+        }
         return $null
     }
     $tempFile = [IO.Path]::GetTempFileName()
     try {
-        Invoke-WebRequest -Uri $DownloadUrl -OutFile $tempFile -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile $tempFile -Headers (Get-UpdateRequestHeaders) -UseBasicParsing -ErrorAction Stop
         $firstLine = (Get-Content -Path $tempFile -TotalCount 1 -ErrorAction SilentlyContinue)
         if ([string]::IsNullOrWhiteSpace($firstLine) -or $firstLine -match "<!DOCTYPE html|Not Found") {
-            Show-Message "Update download failed." ([ConsoleColor]::Red)
+            if (-not $Silent) {
+                Show-Message "Update download failed." ([ConsoleColor]::Red)
+            }
             Write-Log "Update download returned invalid content."
             return $null
         }
         $backupPath = "$scriptPath.bak"
         Copy-Item -Path $scriptPath -Destination $backupPath -Force
         Move-Item -Path $tempFile -Destination $scriptPath -Force
-        Show-Message ("Updated to version " + $LatestVersion + ". Restarting VaultX...") ([ConsoleColor]::Green)
+        if (-not $Silent) {
+            Show-Message ("Updated to version " + $LatestVersion + ".") ([ConsoleColor]::Green)
+        }
         return $scriptPath
     } catch {
         Write-Log ("Update install failed: {0}" -f $_.Exception.Message)
-        Show-Message "Update failed." ([ConsoleColor]::Red)
+        if (-not $Silent) {
+            Show-Message "Update failed." ([ConsoleColor]::Red)
+        }
         return $null
     } finally {
         if (Test-Path $tempFile) {
@@ -427,49 +547,227 @@ function Start-UpdatedScript {
     }
 }
 
-function Invoke-UpdateCheck {
-    param([string]$CurrentVersion)
-    if (-not $script:UpdateCheckEnabled) { return $false }
-    if ([string]::IsNullOrWhiteSpace($script:UpdateConfigUrl)) { return $false }
-    if (Test-IsDevelopmentCopy) { return $false }
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    } catch {
-        Write-Log ("TLS 1.2 setup failed: {0}" -f $_.Exception.Message)
+function Update-UpdateStatusText {
+    if ($null -eq $script:UpdateState) {
+        Reset-UpdateState | Out-Null
     }
-    $content = $null
-    try {
-        $response = Invoke-WebRequest -Uri $script:UpdateConfigUrl -UseBasicParsing -ErrorAction Stop
-        $content = $response.Content
-    } catch {
-        Write-Log ("Update check failed: {0}" -f $_.Exception.Message)
-        return $false
+    if (-not $script:UpdateState.Available) {
+        $script:UpdateState.StatusText = $null
+        return $null
     }
-    $info = Convert-UpdateConfigText -Text $content
-    if ($null -eq $info) { return $false }
-    if ([string]::IsNullOrWhiteSpace($info.Version)) { return $false }
-    $latestVersion = $info.Version
-    $currentDisplay = ConvertTo-VersionString -Value $CurrentVersion
-    $latestDisplay = ConvertTo-VersionString -Value $latestVersion
-    if ([string]::IsNullOrWhiteSpace($currentDisplay) -or [string]::IsNullOrWhiteSpace($latestDisplay)) { return $false }
-    if (Compare-VersionString -Current $currentDisplay -Latest $latestDisplay -ge 0) { return $false }
-    $downloadUrl = Resolve-UpdateTemplate -Value $info.Url -Version $latestDisplay
-    if ([string]::IsNullOrWhiteSpace($downloadUrl)) { return $false }
-    if (-not (Test-UpdateDownloadUrl -Url $downloadUrl)) { return $false }
-    $subtitle = ("Current: {0}  Latest: {1}" -f $currentDisplay, $latestDisplay)
-    $updateNow = $info.Mandatory
-    if (-not $updateNow) {
-        $choice = Show-ActionMenu -Title "Update available" -Options @("Update", "Skip") -Subtitle $subtitle
-        if ($choice -ne "Update") { return $false }
+
+    $title = if ([string]::IsNullOrWhiteSpace($script:UpdateState.LatestVersion)) {
+        "New version found"
+    } else {
+        "New version v{0} found" -f $script:UpdateState.LatestVersion
     }
-    $updatedPath = Install-Update -DownloadUrl $downloadUrl -LatestVersion $latestDisplay
-    if ($updatedPath) {
-        $script:SkipShellOnQuit = $true
-        Start-UpdatedScript -ScriptPath $updatedPath
-        Stop-VaultX -Message "$script:AppName updated."
-        return $true
+
+    switch ($script:UpdateState.Mode) {
+        "auto" {
+            $script:UpdateState.StatusText = "$title`r`nWill install quietly on close."
+        }
+        "manual" {
+            $script:UpdateState.StatusText = "$title`r`nManual update selected."
+        }
+        "later" {
+            $script:UpdateState.StatusText = "$title`r`nUpdate postponed for now."
+        }
+        default {
+            if ($script:UpdateState.CanAutoInstall) {
+                $script:UpdateState.StatusText = "$title`r`nChoose how to update."
+            } else {
+                $script:UpdateState.StatusText = "$title`r`nManual update may be needed."
+            }
+        }
     }
-    return $false
+    return $script:UpdateState.StatusText
+}
+
+function Get-UpdateStatusText {
+    if ($null -eq $script:UpdateState) { return $null }
+    return (Update-UpdateStatusText)
+}
+
+function Set-UpdateMode {
+    param(
+        [string]$Mode,
+        [switch]$Persist
+    )
+    if ($null -eq $script:UpdateState) {
+        Reset-UpdateState | Out-Null
+    }
+    $normalized = if ([string]::IsNullOrWhiteSpace($Mode)) { "none" } else { $Mode.Trim().ToLowerInvariant() }
+    if ($normalized -notin @("none", "auto", "manual", "later")) {
+        $normalized = "none"
+    }
+    if ($normalized -eq "auto" -and -not $script:UpdateState.CanAutoInstall) {
+        $normalized = "manual"
+    }
+    $script:UpdateState.Mode = $normalized
+    $script:UpdateState.PromptPending = ($normalized -eq "none")
+    $script:UpdateState.PromptShown = ($normalized -ne "none")
+    Update-UpdateStatusText | Out-Null
+    if ($Persist) {
+        if ($normalized -in @("auto", "manual")) {
+            Save-UpdateDecision -Mode $normalized -LatestVersion $script:UpdateState.LatestVersion
+        } else {
+            Save-UpdateDecision -Mode $null -LatestVersion $null
+        }
+    }
+    return $script:UpdateState.Mode
+}
+
+function Request-TerminalUpdateChoice {
+    if ($null -eq $script:UpdateState -or -not $script:UpdateState.Available) { return $null }
+    $subtitle = ("Current: {0}  Latest: {1}" -f $script:UpdateState.CurrentVersion, $script:UpdateState.LatestVersion)
+    $options = if ($script:UpdateState.CanAutoInstall) {
+        @("Update on Close", "Manual Update", "Later")
+    } else {
+        $subtitle = "$subtitle  Automatic install is unavailable here."
+        @("Manual Update", "Later")
+    }
+
+    $choice = Show-ActionMenu -Title "Update available" -Options $options -Subtitle $subtitle
+    switch ($choice) {
+        "Update on Close" {
+            Set-UpdateMode -Mode "auto" -Persist | Out-Null
+            Show-Message ("VaultX will install v{0} when you close the app." -f $script:UpdateState.LatestVersion) ([ConsoleColor]::Green)
+        }
+        "Manual Update" {
+            Set-UpdateMode -Mode "manual" -Persist | Out-Null
+            if (-not [string]::IsNullOrWhiteSpace($script:UpdateState.ReleaseUrl)) {
+                Show-Message ("Manual update page: {0}" -f $script:UpdateState.ReleaseUrl) ([ConsoleColor]::Yellow)
+            } else {
+                Show-Message "Manual update selected." ([ConsoleColor]::Yellow)
+            }
+        }
+        default {
+            Set-UpdateMode -Mode "later" -Persist | Out-Null
+        }
+    }
+    return $script:UpdateState.Mode
+}
+
+function Request-GuiUpdateChoice {
+    param([object]$Owner)
+    if ($null -eq $script:UpdateState -or -not $script:UpdateState.Available) { return $null }
+
+    $message = "VaultX v{0} is available.`r`nCurrent version: v{1}." -f $script:UpdateState.LatestVersion, $script:UpdateState.CurrentVersion
+    $options = if ($script:UpdateState.CanAutoInstall) {
+        $message += "`r`nChoose whether VaultX should install it silently when you close the app."
+        @("Update on Close", "Manual Update", "Later")
+    } else {
+        $message += "`r`nAutomatic install is unavailable from this session, so manual update is recommended."
+        @("Manual Update", "Later")
+    }
+
+    $choice = Show-GuiChoiceDialog -Title "Update available" -Message $message -Options $options -Owner $Owner
+    switch ($choice) {
+        "Update on Close" {
+            Set-UpdateMode -Mode "auto" -Persist | Out-Null
+        }
+        "Manual Update" {
+            Set-UpdateMode -Mode "manual" -Persist | Out-Null
+            if (-not [string]::IsNullOrWhiteSpace($script:UpdateState.ReleaseUrl)) {
+                if (Show-GuiConfirm -Text "Open the GitHub release page in your browser now?" -Title "Manual Update" -Owner $Owner) {
+                    Open-WebUrlGui -Url $script:UpdateState.ReleaseUrl -Owner $Owner
+                }
+            }
+        }
+        default {
+            Set-UpdateMode -Mode "later" -Persist | Out-Null
+        }
+    }
+    return $script:UpdateState.Mode
+}
+
+function Initialize-UpdateCheck {
+    param(
+        [string]$CurrentVersion,
+        [ValidateSet("None", "Terminal")]
+        [string]$PromptMode = "None",
+        [switch]$Force
+    )
+    if ($null -ne $script:UpdateState -and $script:UpdateState.Checked -and -not $Force) {
+        if ($PromptMode -eq "Terminal" -and $script:UpdateState.Available -and $script:UpdateState.PromptPending) {
+            Request-TerminalUpdateChoice | Out-Null
+        }
+        return $script:UpdateState
+    }
+
+    $state = Reset-UpdateState
+    $state.Checked = $true
+    $state.CurrentVersion = ConvertTo-VersionString -Value $CurrentVersion
+    if (-not $script:UpdateCheckEnabled) { return $state }
+    if (Test-IsDevelopmentCopy) { return $state }
+
+    $info = Get-RemoteUpdateInfo
+    if ($null -eq $info) { return $state }
+    if ([string]::IsNullOrWhiteSpace($info.Version)) { return $state }
+
+    $latestDisplay = ConvertTo-VersionString -Value $info.Version
+    if ([string]::IsNullOrWhiteSpace($state.CurrentVersion) -or [string]::IsNullOrWhiteSpace($latestDisplay)) {
+        return $state
+    }
+    if ((Compare-VersionString -Current $state.CurrentVersion -Latest $latestDisplay) -ge 0) {
+        Save-UpdateDecision -Mode $null -LatestVersion $null
+        return $state
+    }
+
+    $state.Available = $true
+    $state.LatestVersion = $latestDisplay
+    $state.DownloadUrl = Resolve-UpdateTemplate -Value $info.Url -Version $latestDisplay
+    $state.ReleaseUrl = if (-not [string]::IsNullOrWhiteSpace($info.ReleaseUrl)) {
+        $info.ReleaseUrl
+    } elseif (-not [string]::IsNullOrWhiteSpace($info.Changelog)) {
+        $info.Changelog
+    } else {
+        $state.DownloadUrl
+    }
+    $state.ChangelogUrl = $state.ReleaseUrl
+    $state.Mandatory = [bool]$info.Mandatory
+    $state.CanAutoInstall = Test-UpdateDownloadUrl -Url $state.DownloadUrl
+
+    $savedMode = Get-SavedUpdateDecision -LatestVersion $state.LatestVersion
+    if ($state.Mandatory -and $state.CanAutoInstall) {
+        Set-UpdateMode -Mode "auto" -Persist:$false | Out-Null
+        return $state
+    }
+    if ($savedMode -eq "auto" -and $state.CanAutoInstall) {
+        Set-UpdateMode -Mode "auto" -Persist:$false | Out-Null
+        return $state
+    }
+    if ($savedMode -eq "manual") {
+        Set-UpdateMode -Mode "manual" -Persist:$false | Out-Null
+        return $state
+    }
+
+    $state.Mode = "none"
+    $state.PromptPending = $true
+    $state.PromptShown = $false
+    Update-UpdateStatusText | Out-Null
+
+    if ($PromptMode -eq "Terminal") {
+        Request-TerminalUpdateChoice | Out-Null
+    }
+    return $state
+}
+
+function Invoke-PendingUpdateOnExit {
+    if ($null -eq $script:UpdateState -or -not $script:UpdateState.Available) { return $false }
+    if ($script:UpdateState.Mode -ne "auto") { return $false }
+    if (-not $script:UpdateState.CanAutoInstall) { return $false }
+    if ([string]::IsNullOrWhiteSpace($script:UpdateState.DownloadUrl)) { return $false }
+
+    Write-Log ("Installing VaultX update {0} during shutdown." -f $script:UpdateState.LatestVersion)
+    $updatedPath = Install-Update -DownloadUrl $script:UpdateState.DownloadUrl -LatestVersion $script:UpdateState.LatestVersion -Silent
+    if (-not $updatedPath) { return $false }
+
+    $script:SkipShellOnQuit = $true
+    $script:UpdateInstalledOnExit = $true
+    Save-UpdateDecision -Mode $null -LatestVersion $null
+    Write-Log ("VaultX updated to {0} during shutdown." -f $script:UpdateState.LatestVersion)
+    return $true
 }
 
 function Get-AccountsPath {
@@ -2244,6 +2542,56 @@ function Initialize-Settings {
             $script:GuiTheme = $normalizedTheme
         }
     }
+}
+
+function Get-SavedUpdateDecision {
+    param([string]$LatestVersion)
+    $normalizedLatest = ConvertTo-VersionString -Value $LatestVersion
+    if ([string]::IsNullOrWhiteSpace($normalizedLatest)) { return $null }
+
+    $settings = Read-Settings
+    if ($null -eq $settings) { return $null }
+
+    $savedMode = if ([string]::IsNullOrWhiteSpace($settings.UpdatePreference)) {
+        $null
+    } else {
+        $settings.UpdatePreference.Trim().ToLowerInvariant()
+    }
+    if ($savedMode -notin @("auto", "manual")) { return $null }
+
+    $savedVersion = ConvertTo-VersionString -Value $settings.UpdatePreferenceVersion
+    if ([string]::IsNullOrWhiteSpace($savedVersion) -or $savedVersion -ne $normalizedLatest) {
+        return $null
+    }
+    return $savedMode
+}
+
+function Save-UpdateDecision {
+    param(
+        [string]$Mode,
+        [string]$LatestVersion
+    )
+    $settings = Read-Settings
+    if ($null -eq $settings) { $settings = @{} }
+
+    $normalizedMode = if ([string]::IsNullOrWhiteSpace($Mode)) {
+        $null
+    } else {
+        $Mode.Trim().ToLowerInvariant()
+    }
+    $normalizedVersion = ConvertTo-VersionString -Value $LatestVersion
+
+    if ($normalizedMode -in @("auto", "manual") -and -not [string]::IsNullOrWhiteSpace($normalizedVersion)) {
+        $settings | Add-Member -NotePropertyName UpdatePreference -NotePropertyValue $normalizedMode -Force
+        $settings | Add-Member -NotePropertyName UpdatePreferenceVersion -NotePropertyValue $normalizedVersion -Force
+    } else {
+        foreach ($name in @("UpdatePreference", "UpdatePreferenceVersion")) {
+            if ($settings.PSObject.Properties.Name -contains $name) {
+                $settings.PSObject.Properties.Remove($name)
+            }
+        }
+    }
+    Write-Settings -Settings $settings
 }
 
 function Get-GuiThemeMode {
@@ -4588,6 +4936,69 @@ function Clear-GuiVaultSession {
     }
 }
 
+function Set-GuiFormFocus {
+    param([System.Windows.Forms.Form]$Form)
+    if ($null -eq $Form) { return $false }
+    try {
+        if ($Form.IsDisposed) { return $false }
+    } catch {
+        return $false
+    }
+
+    $interop = if (Initialize-ConsoleWindowInterop) { "VaultXConsoleInterop" -as [type] } else { $null }
+    $handle = [IntPtr]::Zero
+    try {
+        if ($Form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+            $Form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        }
+    } catch {
+        $null = $Form
+    }
+    try {
+        if (-not $Form.Visible) {
+            [void]$Form.Show()
+        }
+    } catch {
+        $null = $Form
+    }
+    try {
+        $handle = $Form.Handle
+    } catch {
+        $handle = [IntPtr]::Zero
+    }
+
+    $originalTopMost = $false
+    try {
+        $originalTopMost = [bool]$Form.TopMost
+    } catch {
+        $originalTopMost = $false
+    }
+
+    try {
+        if ($null -ne $interop -and $handle -ne [IntPtr]::Zero) {
+            $interop::ShowWindow($handle, 9) | Out-Null
+        }
+    } catch {
+        $null = $interop
+    }
+
+    try { $Form.TopMost = $true } catch { $null = $Form }
+    try { $Form.BringToFront() } catch { $null = $Form }
+    try { $Form.Activate() } catch { $null = $Form }
+    try { [void]$Form.Focus() } catch { $null = $Form }
+
+    try {
+        if ($null -ne $interop -and $handle -ne [IntPtr]::Zero) {
+            $interop::SetForegroundWindow($handle) | Out-Null
+        }
+    } catch {
+        $null = $interop
+    } finally {
+        try { $Form.TopMost = $originalTopMost } catch { $null = $Form }
+    }
+    return $true
+}
+
 function Show-GuiForm {
     param([System.Windows.Forms.Form]$Form)
     if ($null -eq $Form) { return }
@@ -4610,8 +5021,7 @@ function Show-GuiForm {
     } catch {
         $null = $Form
     }
-    try { $Form.BringToFront() } catch { $null = $Form }
-    try { $Form.Activate() } catch { $null = $Form }
+    Set-GuiFormFocus -Form $Form | Out-Null
 }
 
 function Show-GuiLauncherForm {
@@ -6433,6 +6843,11 @@ function Start-VaultXGui {
     $updateGuiWindowsCommand = (Get-Command Update-GuiWindows -CommandType Function).ScriptBlock
     $closeAllGuiWindowsCommand = (Get-Command Close-AllGuiWindows -CommandType Function).ScriptBlock
     $restoreConsoleWindowCommand = (Get-Command Restore-ConsoleWindow -CommandType Function).ScriptBlock
+    $setGuiFormFocusCommand = (Get-Command Set-GuiFormFocus -CommandType Function).ScriptBlock
+    $getGuiThemeModeCommand = (Get-Command Get-GuiThemeMode -CommandType Function).ScriptBlock
+    $getGuiThemePaletteCommand = (Get-Command Get-GuiThemePalette -CommandType Function).ScriptBlock
+    $getUpdateStatusTextCommand = (Get-Command Get-UpdateStatusText -CommandType Function).ScriptBlock
+    $requestGuiUpdateChoiceCommand = (Get-Command Request-GuiUpdateChoice -CommandType Function).ScriptBlock
     try {
         Set-ConsoleWindowVisible -Visible:$false | Out-Null
 
@@ -6455,6 +6870,15 @@ function Start-VaultXGui {
         $subtitleLabel.Text = "The terminal process stays active while you work in the local window."
         $subtitleLabel.SetBounds(20, 50, 500, 18)
         $form.Controls.Add($subtitleLabel)
+
+        $updateNoticeLabel = New-Object System.Windows.Forms.Label
+        $updateNoticeLabel.AutoSize = $false
+        $updateNoticeLabel.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+        $updateNoticeLabel.SetBounds(488, 50, 240, 38)
+        $updateNoticeLabel.TextAlign = [System.Drawing.ContentAlignment]::TopRight
+        $updateNoticeLabel.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $updateNoticeLabel.Visible = $false
+        $form.Controls.Add($updateNoticeLabel)
 
         $vaultsLabel = New-Object System.Windows.Forms.Label
         $vaultsLabel.Text = "Vaults"
@@ -6520,6 +6944,31 @@ function Start-VaultXGui {
             return $state.Accounts[$vaultList.SelectedIndex]
         }
 
+        $refreshUpdateNotice = ({
+            $text = & $getUpdateStatusTextCommand
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                $updateNoticeLabel.Text = ""
+                $updateNoticeLabel.Visible = $false
+                return
+            }
+
+            $updateNoticeLabel.Text = $text
+            $theme = & $getGuiThemeModeCommand
+            $palette = & $getGuiThemePaletteCommand -Theme $theme
+            $noticeColor = if ($script:UpdateState.Mode -eq "auto") {
+                $palette.AccentColor
+            } elseif ($script:UpdateState.Mode -eq "manual") {
+                [System.Drawing.Color]::FromArgb(214, 153, 67)
+            } elseif ($palette.Mode -eq "dark") {
+                [System.Drawing.Color]::FromArgb(255, 216, 126)
+            } else {
+                [System.Drawing.Color]::FromArgb(176, 92, 0)
+            }
+
+            $updateNoticeLabel.ForeColor = $noticeColor
+            $updateNoticeLabel.Visible = $true
+        }).GetNewClosure()
+
         $openSelectedVault = {
             try {
                 $account = & $getSelectedAccount
@@ -6541,7 +6990,14 @@ function Start-VaultXGui {
         $themeButton.Add_Click({
             & $switchGuiThemeModeCommand | Out-Null
             & $updateGuiWindowsCommand
+            & $refreshUpdateNotice
         })
+        $updateNoticeLabel.Add_Click(({
+            if ($script:UpdateState.Available) {
+                & $requestGuiUpdateChoiceCommand -Owner $form | Out-Null
+                & $refreshUpdateNotice
+            }
+        }).GetNewClosure())
 
         $buttons["create"].Add_Click({
             try {
@@ -6645,10 +7101,17 @@ function Start-VaultXGui {
             & $stopGuiClipboardAutoClearTimerCommand
             & $restoreConsoleWindowCommand | Out-Null
         }).GetNewClosure())
-        $form.Add_Shown({
+        $form.Add_Shown(({
             & $updateGuiWindowsCommand
             & $refreshAccounts
-        })
+            & $refreshUpdateNotice
+            & $setGuiFormFocusCommand -Form $form | Out-Null
+            if ($script:UpdateState.Available -and $script:UpdateState.PromptPending) {
+                & $requestGuiUpdateChoiceCommand -Owner $form | Out-Null
+                & $refreshUpdateNotice
+                & $setGuiFormFocusCommand -Form $form | Out-Null
+            }
+        }).GetNewClosure())
         [void]$form.ShowDialog()
     } finally {
         $script:GuiLauncherForm = $null
@@ -6672,9 +7135,7 @@ function Invoke-VaultX {
     try {
         Write-Log "VaultX started."
         Register-VaultXSession
-        if (Invoke-UpdateCheck -CurrentVersion $script:AppVersion) {
-            return
-        }
+        Initialize-UpdateCheck -CurrentVersion $script:AppVersion -PromptMode Terminal | Out-Null
         while ($true) {
             $accounts = Sync-AccountsWithVaultFiles -Accounts $accounts
             $menu = Show-AccountMenu -Accounts $accounts -Selected $selectedAccount -StartSection $menuSection
@@ -6767,10 +7228,13 @@ if ($OpenData) {
 }
 
 if ($Gui) {
+    Initialize-Settings
+    Initialize-UpdateCheck -CurrentVersion $script:AppVersion | Out-Null
     $guiResult = Start-VaultXGui -Accounts (Get-Accounts)
+    $updateInstalled = Invoke-PendingUpdateOnExit
     if ($null -ne $guiResult -and $guiResult.Quit) {
         Close-VaultX -Message "$script:AppName closed."
-    } elseif ($null -ne $guiResult -and $guiResult.ReturnToTerminal) {
+    } elseif ($null -ne $guiResult -and $guiResult.ReturnToTerminal -and -not $updateInstalled) {
         Start-InteractiveShellAfterGui
     }
     return
@@ -6789,13 +7253,16 @@ if (-not $script:IsDotSourced) {
         Write-Log ($_.Exception | Out-String)
         Wait-ForExit -Prompt "Press Enter to close VaultX."
     } finally {
+        Invoke-PendingUpdateOnExit | Out-Null
         Close-VaultX
         if ($script:WaitOnExit) {
             Wait-ForExit -Prompt "Press Enter to close VaultX."
         }
     }
     if ($script:QuitRequested) {
-        Start-InteractiveShellOnQuit
+        if (-not $script:UpdateInstalledOnExit) {
+            Start-InteractiveShellOnQuit
+        }
         return
     }
 }
