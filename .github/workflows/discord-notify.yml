@@ -27,10 +27,10 @@ jobs:
             }
 
             const repo = `${context.repo.owner}/${context.repo.repo}`;
+            const repoUrl = `https://github.com/${repo}`;
             const eventName = context.eventName;
-            const actor = context.actor;
-            const embeds = [];
-            let content = `Repository activity in ${repo}`;
+            const owner = context.repo.owner;
+            let embed = null;
 
             if (eventName === 'push') {
               const ref = context.ref.startsWith('refs/heads/')
@@ -40,72 +40,62 @@ jobs:
               const commitLines = commits.map((commit) => {
                 const title = (commit.message || '').split('\n')[0] || '(no message)';
                 const shortSha = (commit.id || '').slice(0, 7);
-                return `[\`${shortSha}\`](${commit.url}) ${title} - ${commit.author?.name || 'unknown'}`;
+                return `[\`${shortSha}\`](${commit.url}) ${title}`;
               });
 
-              content = `Push by ${actor} to \`${ref}\``;
-              embeds.push({
-                title: `${repo} push`,
-                url: context.payload.compare || `https://github.com/${repo}`,
+              embed = {
+                author: {
+                  name: owner,
+                  url: repoUrl
+                },
+                title: `Push to ${ref}`,
+                url: context.payload.compare || repoUrl,
                 color: 0x5865F2,
                 description: commitLines.join('\n') || 'No commit details were included in the payload.',
-                fields: [
-                  {
-                    name: 'Branch',
-                    value: `\`${ref}\``,
-                    inline: true
-                  },
-                  {
-                    name: 'Commit Count',
-                    value: String((context.payload.commits || []).length),
-                    inline: true
-                  },
-                  {
-                    name: 'Pusher',
-                    value: context.payload.pusher?.name || actor,
-                    inline: true
-                  }
-                ],
+                footer: {
+                  text: repo
+                },
                 timestamp: new Date().toISOString()
-              });
+              };
             } else if (eventName === 'release') {
               const release = context.payload.release;
-              const body = (release.body || 'Release published.').slice(0, 4000);
+              const firstAsset = (release.assets || [])[0];
+              const downloadUrl = firstAsset?.browser_download_url || release.html_url;
+              const descriptionLines = [
+                `\`${release.tag_name}\` is now available.`,
+                '',
+                `[Download from GitHub](${downloadUrl})`
+              ];
 
-              content = `Release published by ${actor}: \`${release.tag_name}\``;
-              embeds.push({
-                title: release.name || release.tag_name,
+              embed = {
+                author: {
+                  name: owner,
+                  url: repoUrl
+                },
+                title: `Release: ${release.name || release.tag_name}`,
                 url: release.html_url,
                 color: 0x57F287,
-                description: body,
-                fields: [
-                  {
-                    name: 'Tag',
-                    value: `\`${release.tag_name}\``,
-                    inline: true
-                  },
-                  {
-                    name: 'Target',
-                    value: `\`${release.target_commitish || 'unknown'}\``,
-                    inline: true
-                  },
-                  {
-                    name: 'Assets',
-                    value: String(release.assets?.length || 0),
-                    inline: true
-                  }
-                ],
+                description: descriptionLines.join('\n'),
+                footer: {
+                  text: repo
+                },
                 timestamp: release.published_at || new Date().toISOString()
-              });
+              };
             } else {
-              content = `Workflow event: ${eventName}`;
-              embeds.push({
-                title: `${repo} workflow event`,
+              embed = {
+                author: {
+                  name: owner,
+                  url: repoUrl
+                },
+                title: eventName.replace(/_/g, ' '),
                 url: `https://github.com/${repo}/actions/runs/${context.runId}`,
                 color: 0xFEE75C,
-                description: `Triggered by ${actor}.`,
+                description: `GitHub Actions event for \`${repo}\`.`,
+                footer: {
+                  text: repo
+                },
                 timestamp: new Date().toISOString()
-              });
+              };
             }
 
             const response = await fetch(webhook, {
@@ -113,8 +103,7 @@ jobs:
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 username: 'VaultX Notifications',
-                content,
-                embeds
+                embeds: [embed]
               })
             });
 
