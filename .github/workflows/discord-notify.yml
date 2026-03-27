@@ -15,12 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send Discord notification
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         with:
           script: |
-            const webhook = process.env.DISCORD_WEBHOOK_URL;
+            const webhook = (process.env.DISCORD_WEBHOOK_URL || '').trim();
             if (!webhook) {
               core.setFailed('Missing DISCORD_WEBHOOK_URL secret.');
               return;
