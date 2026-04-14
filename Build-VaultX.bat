@@ -65,6 +65,7 @@ try {
         Company     = "Cedrick Grabe"
         Version     = $version
         Copyright   = "Copyright (c) $year Cedrick Grabe. All rights reserved."
+        Trademark   = "business.grabe@gmail.com"
         Description = "VaultX Password Manager v$version"
     }
     if (Test-Path $iconFile) {
