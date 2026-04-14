@@ -52,8 +52,29 @@ if (Test-Path $iconFile) {
 
 Invoke-PS2EXE @ps2exeArgs
 
-if (Test-Path $outputFile) {
-    Write-Host "Build complete: $outputFile" -ForegroundColor Green
-} else {
+if (-not (Test-Path $outputFile)) {
     Write-Error "Build failed. Output file was not created."
+    return
 }
+
+Write-Host "Build complete: $outputFile" -ForegroundColor Green
+
+# Install to local app data and create Start Menu shortcut
+$installDir = Join-Path $env:LOCALAPPDATA "VaultX"
+$startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+$targetExe = Join-Path $installDir "VaultX.exe"
+
+if (-not (Test-Path $installDir)) {
+    New-Item -ItemType Directory -Path $installDir | Out-Null
+}
+
+Copy-Item -Path $outputFile -Destination $targetExe -Force
+Write-Host "Installed to: $targetExe" -ForegroundColor Green
+
+$shell = New-Object -ComObject WScript.Shell
+$mainLnk = $shell.CreateShortcut((Join-Path $startMenu "VaultX.lnk"))
+$mainLnk.TargetPath = $targetExe
+$mainLnk.WorkingDirectory = $installDir
+$mainLnk.Description = "VaultX Password Manager"
+$mainLnk.Save()
+Write-Host "Start Menu shortcut created. VaultX is now searchable." -ForegroundColor Green

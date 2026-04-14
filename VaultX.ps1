@@ -2620,6 +2620,58 @@ function Set-AutoUpdateSetting {
     Write-Settings -Settings $settings
 }
 
+function Install-StartMenuShortcut {
+    $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+    $scriptPath = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        Show-Message "Could not determine script location." ([ConsoleColor]::Red)
+        return
+    }
+
+    $targetPath = $scriptPath
+    $targetArgs = ""
+    $ext = [IO.Path]::GetExtension($scriptPath).ToLowerInvariant()
+    if ($ext -eq ".ps1") {
+        $targetPath = "powershell.exe"
+        $targetArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    }
+
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $lnk = $shell.CreateShortcut((Join-Path $startMenu "VaultX.lnk"))
+        $lnk.TargetPath = $targetPath
+        if ($targetArgs) { $lnk.Arguments = $targetArgs }
+        $lnk.WorkingDirectory = Split-Path -Parent $scriptPath
+        $lnk.Description = "VaultX Password Manager"
+        $lnk.Save()
+        Show-Message "VaultX shortcut added to Start Menu." ([ConsoleColor]::Green)
+    } catch {
+        Write-Log ("Start Menu shortcut failed: {0}" -f $_.Exception.Message)
+        Show-Message "Failed to create shortcut." ([ConsoleColor]::Red)
+        return
+    }
+
+    Write-Host "Add extra search names so VaultX shows up under other keywords?" -ForegroundColor $script:MenuPromptColor
+    $aliasInput = Read-Host "Names (comma-separated, Enter to skip)"
+    if (-not [string]::IsNullOrWhiteSpace($aliasInput)) {
+        foreach ($raw in ($aliasInput -split ",")) {
+            $alias = $raw.Trim()
+            if ([string]::IsNullOrWhiteSpace($alias)) { continue }
+            try {
+                $aliasLnk = $shell.CreateShortcut((Join-Path $startMenu "VaultX ($alias).lnk"))
+                $aliasLnk.TargetPath = $targetPath
+                if ($targetArgs) { $aliasLnk.Arguments = $targetArgs }
+                $aliasLnk.WorkingDirectory = Split-Path -Parent $scriptPath
+                $aliasLnk.Description = "VaultX Password Manager"
+                $aliasLnk.Save()
+                Write-Host "  Added alias: $alias" -ForegroundColor Green
+            } catch {
+                Write-Host "  Failed alias: $alias" -ForegroundColor Red
+            }
+        }
+    }
+}
+
 function Get-GuiThemeMode {
     if ([string]::IsNullOrWhiteSpace($script:GuiTheme)) {
         $script:GuiTheme = "dark"
@@ -4079,7 +4131,7 @@ function Show-AccountMenu {
             switch ($section) {
                 "settings" {
                     $autoLabel = if ($script:AutoUpdateEnabled) { "Auto Update: ON" } else { "Auto Update: OFF" }
-                    $settingsOptions = @($autoLabel, "Customize", "Clear cache", "Back")
+                    $settingsOptions = @($autoLabel, "Add to Search Bar", "Customize", "Clear cache", "Back")
                     $choice = Show-ActionMenu -Title "Script Settings" -Options $settingsOptions -Hint "Up/Down move, Enter select, Esc back."
                     $isFirstRender = $true
                     if ($null -eq $choice -or $choice -eq "Back") {
@@ -4092,8 +4144,16 @@ function Show-AccountMenu {
                         if ($newState) {
                             Show-Message "Auto update enabled. Updates install silently on close." ([ConsoleColor]::Green)
                         } else {
-                            Show-Message ("Auto update disabled. Download updates manually from:`r`n  https://github.com/CedrickGD/Vault-X/releases/latest") ([ConsoleColor]::Yellow)
+                            Write-Host "Auto update disabled. Download updates manually from:" -ForegroundColor Yellow
+                            Write-Host "  https://github.com/CedrickGD/Vault-X/releases/latest" -ForegroundColor Cyan
+                            Write-Host ""
+                            Write-Host "Press any key to return." -ForegroundColor DarkGray
+                            [void](Read-MenuKey)
                         }
+                        continue
+                    }
+                    if ($choice -eq "Add to Search Bar") {
+                        Install-StartMenuShortcut
                         continue
                     }
                     if ($choice -eq "Customize") { return @{ Action = "customize"; Section = "settings"; Selected = 0; Accounts = $menuState.Accounts } }
