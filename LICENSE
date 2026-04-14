@@ -1,27 +1,53 @@
-VaultX License
+Proprietary License Agreement
+Copyright (c) 2026 Cedrick Grabe
+All Rights Reserved
 
-Copyright (c) 2026 CedrickGD
+This software and its source code ("the Software") are the intellectual
+property of Cedrick Grabe. By obtaining, downloading, installing, or using
+the Software, you agree to the following terms and conditions:
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to use,
-copy, modify, and redistribute the Software for personal, educational, or
-non-commercial purposes, subject to the following conditions:
+1. Grant of Use
+You are granted a non-exclusive, non-transferable, revocable license to use,
+copy, and share the Software for personal, educational, or non-commercial
+purposes. This license does not grant you any ownership or intellectual
+property rights in the Software.
 
-1. The above copyright notice and this permission notice shall be included in
-   all copies or substantial portions of the Software.
+2. Permitted Sharing
+You may redistribute unmodified copies of the Software free of charge,
+provided that this license is included in its entirety and the origin of
+the Software is not misrepresented.
 
-2. The Software may not be sold, sublicensed, or otherwise used for commercial
-   purposes — including but not limited to selling the Software, incorporating
-   it into a paid product or service, or using it to generate revenue — without
-   prior written permission from the copyright holder.
+3. Restrictions
+You are expressly prohibited from:
+   - Selling, sublicensing, or otherwise commercializing the Software or any
+     portion thereof without prior written consent from Cedrick Grabe;
+   - Using the Software to generate revenue, whether directly or as part of
+     a paid product or service, without prior written consent;
+   - Removing or altering any copyright, trademark, or other proprietary
+     notices contained in the Software;
+   - Misrepresenting the origin or authorship of the Software.
 
-3. Redistributions must retain this license in its entirety and may not
-   misrepresent the origin of the Software.
+4. No Warranty
+The Software is provided "as is", without warranty of any kind, express or
+implied. This includes, but is not limited to, warranties of merchantability,
+fitness for a particular purpose, and non-infringement. Use of the Software
+is at your own risk.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+5. Limitation of Liability
+Under no circumstances shall Cedrick Grabe be held liable for any damages
+arising out of or related to the use or inability to use the Software,
+including but not limited to loss of data, loss of profits, or business
+interruption.
+
+6. Termination
+This license is effective until terminated. It will terminate automatically
+without notice if you breach any of its terms. Upon termination, you must
+immediately cease all use of the Software and destroy any copies in your
+possession.
+
+7. Governing Law
+This agreement shall be governed by and construed in accordance with the
+laws of Germany, without regard to its conflict of law principles.
+
+For inquiries or licensing requests, contact:
+business.grabe@gmail.com
