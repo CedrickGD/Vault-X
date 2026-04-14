@@ -62,12 +62,23 @@ $script:GuiLauncherForm = $null
 $script:GuiIconCache = @{}
 $script:GuiClipboardAutoClearTimer = $null
 $script:GuiClipboardAutoClearTarget = $null
+$script:HasConsole = $false
+try {
+    $null = [Console]::WindowWidth
+    $script:HasConsole = $true
+} catch {}
 try {
     if ($Host -and $Host.UI -and $Host.UI.RawUI) {
         $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
     }
 } catch {
     $script:DefaultHostForegroundColor = $null
+}
+
+function Set-ConsoleCursorPosition {
+    param([int]$X, [int]$Y)
+    if (-not $script:HasConsole) { return }
+    try { [Console]::SetCursorPosition($X, $Y) } catch {}
 }
 
 function Convert-SecureStringToPlain {
@@ -1910,7 +1921,7 @@ function Write-MenuFrame {
         if ($null -ne $script:FrameBufferLines) {
             $script:LastFrameLineCount = $script:FrameBufferLines.Count
         }
-        [Console]::SetCursorPosition(0, 0)
+        Set-ConsoleCursorPosition -X 0 -Y 0
         $defaultColor = [Console]::ForegroundColor
         for ($i = 0; $i -lt $height; $i++) {
             $lineText = ""
@@ -1932,12 +1943,8 @@ function Write-MenuFrame {
             }
         }
         [Console]::ForegroundColor = $defaultColor
-        try {
-            $targetRow = [Math]::Min([Math]::Max(0, $script:LastFrameLineCount), [Math]::Max(0, $height - 1))
-            [Console]::SetCursorPosition(0, $targetRow)
-        } catch {
-            Write-Log ("Frame cursor reset failed: {0}" -f $_.Exception.Message)
-        }
+        $targetRow = [Math]::Min([Math]::Max(0, $script:LastFrameLineCount), [Math]::Max(0, $height - 1))
+        Set-ConsoleCursorPosition -X 0 -Y $targetRow
     } catch {
         Clear-Host
         foreach ($line in $script:FrameBufferLines) {
@@ -2925,7 +2932,7 @@ function Start-MenuFrame {
     param([ref]$IsFirstRender)
     if ($IsFirstRender.Value) {
         try {
-            [Console]::SetCursorPosition(0, 0)
+            Set-ConsoleCursorPosition -X 0 -Y 0
         } catch {
             Clear-Host
         }
@@ -2933,9 +2940,9 @@ function Start-MenuFrame {
     }
     $script:FrameBufferLines = @()
     $script:FrameBufferActive = $true
-    try {
-        [Console]::SetCursorPosition(0, 0)
-    } catch {
+    if ($script:HasConsole) {
+        Set-ConsoleCursorPosition -X 0 -Y 0
+    } else {
         Clear-Host
     }
 }
