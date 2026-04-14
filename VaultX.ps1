@@ -2083,24 +2083,23 @@ function Start-ClipboardAutoClearProcess {
     if ($null -eq (Get-Command -Name Get-Clipboard -ErrorAction SilentlyContinue)) { return }
 
     try {
-        $expectedBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ExpectedValue))
-        $command = @"
-Start-Sleep -Seconds $($script:ClipboardAutoClearSeconds)
-try {
-    \$expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$expectedBase64'))
-    \$current = Get-Clipboard -Raw -ErrorAction Stop
-    if (\$current -eq \$expected) {
-        Set-Clipboard -Value '' -ErrorAction Stop
-    }
-} catch {}
-"@
-        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-        Start-Process -FilePath "powershell.exe" -ArgumentList @(
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-WindowStyle", "Hidden",
-            "-EncodedCommand", $encoded
-        ) -ErrorAction Stop | Out-Null
+        if ($null -ne $script:CliClipboardTimer) {
+            $script:CliClipboardTimer.Dispose()
+            $script:CliClipboardTimer = $null
+        }
+        $script:CliClipboardExpected = $ExpectedValue
+        $delay = [Math]::Max(250, ($script:ClipboardAutoClearSeconds * 1000))
+        $script:CliClipboardTimer = New-Object System.Threading.Timer(
+            [System.Threading.TimerCallback]{
+                try {
+                    $current = Get-Clipboard -Raw -ErrorAction Stop
+                    if ($current -eq $script:CliClipboardExpected) {
+                        Set-Clipboard -Value '' -ErrorAction Stop
+                    }
+                } catch { $null }
+                $script:CliClipboardTimer.Dispose()
+                $script:CliClipboardTimer = $null
+            }, $null, $delay, [System.Threading.Timeout]::Infinite)
     } catch {
         Write-Log ("Clipboard auto-clear scheduling failed: {0}" -f $_.Exception.Message)
     }
