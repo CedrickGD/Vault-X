@@ -35,7 +35,7 @@ if (-not (Test-Path $distDir)) {
 
 Write-Host "Building VaultX v$version..." -ForegroundColor Cyan
 
-$iconFile = Join-Path $scriptDir "VaultX.ico"
+$iconFile = Join-Path $scriptDir "assets" "VaultX.ico"
 $ps2exeArgs = @{
     InputFile  = $sourceFile
     OutputFile = $outputFile

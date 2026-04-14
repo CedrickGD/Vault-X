@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script:AppName = "VaultX"
-$script:AppVersion = "1.0.5"
+$script:AppVersion = "1.0.6"
 $script:UpdateReleaseApiUrl = "https://api.github.com/repos/CedrickGD/Vault-X/releases/latest"
 $script:UpdateConfigUrl = "https://raw.githubusercontent.com/CedrickGD/Vault-X/main/version.yml"
 $script:UpdateCheckEnabled = ($env:VAULTX_UPDATE_CHECK -ne "0")
@@ -2636,6 +2636,8 @@ function Install-StartMenuShortcut {
         $targetArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
     }
 
+    $iconPath = Join-Path -Path (Split-Path -Parent $scriptPath) -ChildPath "assets\VaultX.ico"
+
     try {
         $shell = New-Object -ComObject WScript.Shell
         $lnk = $shell.CreateShortcut((Join-Path $startMenu "VaultX.lnk"))
@@ -2643,6 +2645,7 @@ function Install-StartMenuShortcut {
         if ($targetArgs) { $lnk.Arguments = $targetArgs }
         $lnk.WorkingDirectory = Split-Path -Parent $scriptPath
         $lnk.Description = "VaultX Password Manager"
+        if (Test-Path $iconPath) { $lnk.IconLocation = "$iconPath, 0" }
         $lnk.Save()
         Show-Message "VaultX shortcut added to Start Menu." ([ConsoleColor]::Green)
     } catch {
@@ -2663,6 +2666,7 @@ function Install-StartMenuShortcut {
                 if ($targetArgs) { $aliasLnk.Arguments = $targetArgs }
                 $aliasLnk.WorkingDirectory = Split-Path -Parent $scriptPath
                 $aliasLnk.Description = "VaultX Password Manager"
+                if (Test-Path $iconPath) { $aliasLnk.IconLocation = "$iconPath, 0" }
                 $aliasLnk.Save()
                 Write-Host "  Added alias: $alias" -ForegroundColor Green
             } catch {
