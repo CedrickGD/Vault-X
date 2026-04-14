@@ -34,6 +34,7 @@ $script:UpdateState = [pscustomobject][ordered]@{
 }
 $script:UpdateInstalledOnExit = $false
 $script:SkipShellOnQuit = $false
+$script:AutoUpdateEnabled = $false
 $script:MenuNormalColor = [ConsoleColor]::Gray
 $script:MenuHighlightColor = [ConsoleColor]::Cyan
 $script:MenuDisabledColor = [ConsoleColor]::DarkGray
@@ -567,7 +568,12 @@ function Update-UpdateStatusText {
             $script:UpdateState.StatusText = "$title`r`nWill install quietly on close."
         }
         "manual" {
-            $script:UpdateState.StatusText = "$title`r`nManual update selected."
+            $manualUrl = if (-not [string]::IsNullOrWhiteSpace($script:UpdateState.ReleaseUrl)) {
+                $script:UpdateState.ReleaseUrl
+            } else {
+                "https://github.com/CedrickGD/Vault-X/releases/latest"
+            }
+            $script:UpdateState.StatusText = "$title`r`nDownload from: $manualUrl"
         }
         "later" {
             $script:UpdateState.StatusText = "$title`r`nUpdate postponed for now."
@@ -635,11 +641,12 @@ function Request-TerminalUpdateChoice {
         }
         "Manual Update" {
             Set-UpdateMode -Mode "manual" -Persist | Out-Null
-            if (-not [string]::IsNullOrWhiteSpace($script:UpdateState.ReleaseUrl)) {
-                Show-Message ("Manual update page: {0}" -f $script:UpdateState.ReleaseUrl) ([ConsoleColor]::Yellow)
+            $manualUrl = if (-not [string]::IsNullOrWhiteSpace($script:UpdateState.ReleaseUrl)) {
+                $script:UpdateState.ReleaseUrl
             } else {
-                Show-Message "Manual update selected." ([ConsoleColor]::Yellow)
+                "https://github.com/CedrickGD/Vault-X/releases/latest"
             }
+            Show-Message ("Download the latest version from:`r`n  {0}" -f $manualUrl) ([ConsoleColor]::Yellow)
         }
         default {
             Set-UpdateMode -Mode "later" -Persist | Out-Null
@@ -668,10 +675,13 @@ function Request-GuiUpdateChoice {
         }
         "Manual Update" {
             Set-UpdateMode -Mode "manual" -Persist | Out-Null
-            if (-not [string]::IsNullOrWhiteSpace($script:UpdateState.ReleaseUrl)) {
-                if (Show-GuiConfirm -Text "Open the GitHub release page in your browser now?" -Title "Manual Update" -Owner $Owner) {
-                    Open-WebUrlGui -Url $script:UpdateState.ReleaseUrl -Owner $Owner
-                }
+            $manualUrl = if (-not [string]::IsNullOrWhiteSpace($script:UpdateState.ReleaseUrl)) {
+                $script:UpdateState.ReleaseUrl
+            } else {
+                "https://github.com/CedrickGD/Vault-X/releases/latest"
+            }
+            if (Show-GuiConfirm -Text ("Open the download page in your browser?`r`n`r`n" + $manualUrl) -Title "Manual Update" -Owner $Owner) {
+                Open-WebUrlGui -Url $manualUrl -Owner $Owner
             }
         }
         default {
@@ -728,6 +738,10 @@ function Initialize-UpdateCheck {
     $state.Mandatory = [bool]$info.Mandatory
     $state.CanAutoInstall = Test-UpdateDownloadUrl -Url $state.DownloadUrl
 
+    if ($script:AutoUpdateEnabled -and $state.CanAutoInstall) {
+        Set-UpdateMode -Mode "auto" -Persist:$false | Out-Null
+        return $state
+    }
     $savedMode = Get-SavedUpdateDecision -LatestVersion $state.LatestVersion
     if ($state.Mandatory -and $state.CanAutoInstall) {
         Set-UpdateMode -Mode "auto" -Persist:$false | Out-Null
@@ -2541,6 +2555,10 @@ function Initialize-Settings {
             $script:GuiTheme = $normalizedTheme
         }
     }
+    $autoUpdateValue = $settings.AutoUpdate
+    if ($null -ne $autoUpdateValue) {
+        $script:AutoUpdateEnabled = [bool]$autoUpdateValue
+    }
 }
 
 function Get-SavedUpdateDecision {
@@ -2590,6 +2608,15 @@ function Save-UpdateDecision {
             }
         }
     }
+    Write-Settings -Settings $settings
+}
+
+function Set-AutoUpdateSetting {
+    param([bool]$Enabled)
+    $script:AutoUpdateEnabled = $Enabled
+    $settings = Read-Settings
+    if ($null -eq $settings) { $settings = @{} }
+    $settings | Add-Member -NotePropertyName AutoUpdate -NotePropertyValue $Enabled -Force
     Write-Settings -Settings $settings
 }
 
@@ -4051,11 +4078,22 @@ function Show-AccountMenu {
         while ($true) {
             switch ($section) {
                 "settings" {
-                    $settingsOptions = @("Customize", "Clear cache", "Back")
+                    $autoLabel = if ($script:AutoUpdateEnabled) { "Auto Update: ON" } else { "Auto Update: OFF" }
+                    $settingsOptions = @($autoLabel, "Customize", "Clear cache", "Back")
                     $choice = Show-ActionMenu -Title "Script Settings" -Options $settingsOptions -Hint "Up/Down move, Enter select, Esc back."
                     $isFirstRender = $true
                     if ($null -eq $choice -or $choice -eq "Back") {
                         $section = "main"
+                        continue
+                    }
+                    if ($choice -like "Auto Update:*") {
+                        $newState = -not $script:AutoUpdateEnabled
+                        Set-AutoUpdateSetting -Enabled $newState
+                        if ($newState) {
+                            Show-Message "Auto update enabled. Updates install silently on close." ([ConsoleColor]::Green)
+                        } else {
+                            Show-Message ("Auto update disabled. Download updates manually from:`r`n  https://github.com/CedrickGD/Vault-X/releases/latest") ([ConsoleColor]::Yellow)
+                        }
                         continue
                     }
                     if ($choice -eq "Customize") { return @{ Action = "customize"; Section = "settings"; Selected = 0; Accounts = $menuState.Accounts } }
