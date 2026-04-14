@@ -103,7 +103,6 @@ jobs:
             }
 
             const payload = JSON.stringify({
-              username: 'VaultX Notifications',
               embeds: [embed]
             });
 
