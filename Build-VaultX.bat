@@ -55,15 +55,17 @@ try {
 
     Write-Host "Building VaultX v$version..." -ForegroundColor Cyan
 
+    $year = (Get-Date).Year
     $ps2exeArgs = @{
         InputFile   = $sourceFile
         OutputFile  = $outputFile
         NoConsole   = $false
         Title       = "VaultX"
         Product     = "VaultX"
+        Company     = "Cedrick Grabe"
         Version     = $version
-        Copyright   = "VaultX"
-        Description = "VaultX Password Manager"
+        Copyright   = "Copyright (c) $year Cedrick Grabe. All rights reserved."
+        Description = "VaultX Password Manager v$version"
     }
     if (Test-Path $iconFile) {
         $ps2exeArgs.IconFile = $iconFile
@@ -76,6 +78,23 @@ try {
     }
 
     Write-Host "Build complete: $outputFile" -ForegroundColor Green
+
+    # Code signing
+    $signingCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
+        Where-Object { $_.Subject -match "VaultX" -and $_.NotAfter -gt (Get-Date) } |
+        Sort-Object NotAfter -Descending | Select-Object -First 1
+    if ($signingCert) {
+        Write-Host "Signing with: $($signingCert.Subject)..." -ForegroundColor Cyan
+        $sig = Set-AuthenticodeSignature -FilePath $outputFile -Certificate $signingCert `
+            -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
+        if ($sig.Status -eq "Valid") {
+            Write-Host "Signed and timestamped." -ForegroundColor Green
+        } else {
+            Write-Host "Warning: Signing returned status '$($sig.Status)'" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "No VaultX code signing certificate found. Skipping signing." -ForegroundColor Yellow
+    }
 
     # Install to local app data and create Start Menu shortcut
     $installDir = Join-Path $env:LOCALAPPDATA "VaultX"
