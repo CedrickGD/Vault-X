@@ -2624,6 +2624,9 @@ function Install-StartMenuShortcut {
     $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        $scriptPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    }
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
         Show-Message "Could not determine script location." ([ConsoleColor]::Red)
         return
     }
@@ -2636,7 +2639,13 @@ function Install-StartMenuShortcut {
         $targetArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
     }
 
-    $iconPath = Join-Path -Path (Split-Path -Parent $scriptPath) -ChildPath "assets\VaultX.ico"
+    $iconLocation = $null
+    if ($ext -eq ".exe") {
+        $iconLocation = "$scriptPath, 0"
+    } else {
+        $icoPath = Join-Path -Path (Split-Path -Parent $scriptPath) -ChildPath "assets\VaultX.ico"
+        if (Test-Path $icoPath) { $iconLocation = "$icoPath, 0" }
+    }
 
     try {
         $shell = New-Object -ComObject WScript.Shell
@@ -2645,7 +2654,7 @@ function Install-StartMenuShortcut {
         if ($targetArgs) { $lnk.Arguments = $targetArgs }
         $lnk.WorkingDirectory = Split-Path -Parent $scriptPath
         $lnk.Description = "VaultX Password Manager"
-        if (Test-Path $iconPath) { $lnk.IconLocation = "$iconPath, 0" }
+        if ($iconLocation) { $lnk.IconLocation = $iconLocation }
         $lnk.Save()
         Show-Message "VaultX shortcut added to Start Menu." ([ConsoleColor]::Green)
     } catch {
@@ -2666,7 +2675,7 @@ function Install-StartMenuShortcut {
                 if ($targetArgs) { $aliasLnk.Arguments = $targetArgs }
                 $aliasLnk.WorkingDirectory = Split-Path -Parent $scriptPath
                 $aliasLnk.Description = "VaultX Password Manager"
-                if (Test-Path $iconPath) { $aliasLnk.IconLocation = "$iconPath, 0" }
+                if ($iconLocation) { $aliasLnk.IconLocation = $iconLocation }
                 $aliasLnk.Save()
                 Write-Host "  Added alias: $alias" -ForegroundColor Green
             } catch {

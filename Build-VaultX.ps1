@@ -26,7 +26,11 @@ $version = if ($null -ne $versionMatch) { $versionMatch.Matches[0].Groups[1].Val
 
 if (-not (Get-Module -ListAvailable -Name ps2exe)) {
     Write-Host "Installing ps2exe module..." -ForegroundColor Yellow
-    Install-Module -Name ps2exe -Scope CurrentUser -Force
+    if (Get-Command Install-PSResource -ErrorAction SilentlyContinue) {
+        Install-PSResource ps2exe -Scope CurrentUser -TrustRepository
+    } else {
+        Install-Module -Name ps2exe -Scope CurrentUser -Force -AllowClobber
+    }
 }
 
 if (-not (Test-Path $distDir)) {
