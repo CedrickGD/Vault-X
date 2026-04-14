@@ -18,11 +18,15 @@ jobs:
         uses: actions/github-script@v8
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FLTU_DISCORD_WEBHOOK_URL: ${{ secrets.FLTU_DISCORD_WEBHOOK_URL }}
         with:
           script: |
-            const webhook = (process.env.DISCORD_WEBHOOK_URL || '').trim();
-            if (!webhook) {
-              core.setFailed('Missing DISCORD_WEBHOOK_URL secret.');
+            const webhooks = [
+              (process.env.DISCORD_WEBHOOK_URL || '').trim(),
+              (process.env.FLTU_DISCORD_WEBHOOK_URL || '').trim()
+            ].filter(Boolean);
+            if (webhooks.length === 0) {
+              core.setFailed('No Discord webhook URLs configured.');
               return;
             }
 
@@ -98,16 +102,20 @@ jobs:
               };
             }
 
-            const response = await fetch(webhook, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                username: 'VaultX Notifications',
-                embeds: [embed]
-              })
+            const payload = JSON.stringify({
+              username: 'VaultX Notifications',
+              embeds: [embed]
             });
 
-            if (!response.ok) {
-              const body = await response.text();
-              core.setFailed(`Discord webhook failed (${response.status}): ${body}`);
+            for (const webhook of webhooks) {
+              const response = await fetch(webhook, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: payload
+              });
+
+              if (!response.ok) {
+                const body = await response.text();
+                core.warning(`Discord webhook failed (${response.status}): ${body}`);
+              }
             }
