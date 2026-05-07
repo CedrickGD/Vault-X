@@ -14,7 +14,6 @@ A local, single-user password manager built in PowerShell. Encrypted JSON vaults
 - Add, view, edit, and delete entries for logins, URLs, and notes.
 - Built-in password generator in the entry editor plus `/gen` shortcut support in terminal prompts.
 - Search plus quick clipboard copy for entry fields.
-- Clipboard copies auto-clear after a short delay when unchanged.
 
 ### GUI
 - Optional local Windows GUI mode with vault browser, entry editor, CSV import, export, 2FA, and recovery controls.

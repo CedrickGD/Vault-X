@@ -43,7 +43,6 @@ $script:MenuPromptColor = [ConsoleColor]::Gray
 $script:MenuBannerColor = [ConsoleColor]::Cyan
 $script:MenuPointerSymbol = ">"
 $script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
-$script:ClipboardAutoClearSeconds = 20
 $script:DefaultGeneratedPasswordLength = 20
 $script:DefaultMenuNormalColor = $script:MenuNormalColor
 $script:DefaultMenuPromptColor = $script:MenuPromptColor
@@ -60,8 +59,6 @@ $script:GuiWindowRegistry = @()
 $script:GuiVaultSessions = @{}
 $script:GuiLauncherForm = $null
 $script:GuiIconCache = @{}
-$script:GuiClipboardAutoClearTimer = $null
-$script:GuiClipboardAutoClearTarget = $null
 $script:HasConsole = $false
 try {
     $null = [Console]::WindowWidth
@@ -2097,43 +2094,6 @@ function Set-CursorVisible {
     }
 }
 
-function Start-ClipboardAutoClearProcess {
-    param([string]$ExpectedValue)
-    if ([string]::IsNullOrEmpty($ExpectedValue)) { return }
-    if ($script:ClipboardAutoClearSeconds -le 0) { return }
-    if ($null -eq (Get-Command -Name Get-Clipboard -ErrorAction SilentlyContinue)) { return }
-
-    try {
-        if ($null -ne $script:CliClipboardTimer) {
-            $script:CliClipboardTimer.Dispose()
-            $script:CliClipboardTimer = $null
-        }
-        $script:CliClipboardExpected = $ExpectedValue
-        $delay = [Math]::Max(250, ($script:ClipboardAutoClearSeconds * 1000))
-        $script:CliClipboardTimer = New-Object System.Threading.Timer(
-            [System.Threading.TimerCallback]{
-                try {
-                    $current = Get-Clipboard -Raw -ErrorAction Stop
-                    if ($current -eq $script:CliClipboardExpected) {
-                        Set-Clipboard -Value '' -ErrorAction Stop
-                    }
-                } catch { $null }
-                $script:CliClipboardTimer.Dispose()
-                $script:CliClipboardTimer = $null
-            }, $null, $delay, [System.Threading.Timeout]::Infinite)
-    } catch {
-        Write-Log ("Clipboard auto-clear scheduling failed: {0}" -f $_.Exception.Message)
-    }
-}
-
-function Stop-GuiClipboardAutoClearTimer {
-    if ($null -eq $script:GuiClipboardAutoClearTimer) { return }
-    try { $script:GuiClipboardAutoClearTimer.Stop() } catch { $null = $script:GuiClipboardAutoClearTimer }
-    try { $script:GuiClipboardAutoClearTimer.Dispose() } catch { $null = $script:GuiClipboardAutoClearTimer }
-    $script:GuiClipboardAutoClearTimer = $null
-    $script:GuiClipboardAutoClearTarget = $null
-}
-
 function Test-GuiClipboardMode {
     if (-not $script:GuiInitialized) { return $false }
     if ($null -ne $script:GuiLauncherForm) {
@@ -2155,49 +2115,13 @@ function Test-GuiClipboardMode {
     return $false
 }
 
-function Start-GuiClipboardAutoClearTimer {
-    param([string]$ExpectedValue)
-    if ([string]::IsNullOrEmpty($ExpectedValue)) { return }
-    if ($script:ClipboardAutoClearSeconds -le 0) { return }
-    if (-not (Test-GuiClipboardMode)) { return }
-    if (-not (Initialize-GuiFramework)) { return }
-
-    Stop-GuiClipboardAutoClearTimer
-    $script:GuiClipboardAutoClearTarget = $ExpectedValue
-    $writeLogCommand = (Get-Command Write-Log -CommandType Function).ScriptBlock
-    $stopGuiClipboardAutoClearTimerCommand = (Get-Command Stop-GuiClipboardAutoClearTimer -CommandType Function).ScriptBlock
-
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = [Math]::Max(250, ($script:ClipboardAutoClearSeconds * 1000))
-    $timer.Add_Tick(({
-        try {
-            $current = ""
-            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
-                $current = [System.Windows.Forms.Clipboard]::GetText()
-            }
-            if ($current -eq $script:GuiClipboardAutoClearTarget) {
-                [System.Windows.Forms.Clipboard]::SetText("")
-            }
-        } catch {
-            & $writeLogCommand ("GUI clipboard auto-clear failed: {0}" -f $_.Exception.Message)
-        } finally {
-            & $stopGuiClipboardAutoClearTimerCommand
-        }
-    }).GetNewClosure())
-    $script:GuiClipboardAutoClearTimer = $timer
-    $timer.Start()
-}
-
 function Set-ClipboardSafe {
     param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $false }
+
     if (Test-GuiClipboardMode) {
         try {
-            if ([string]::IsNullOrEmpty($Value)) {
-                [System.Windows.Forms.Clipboard]::Clear()
-            } else {
-                [System.Windows.Forms.Clipboard]::SetText($Value)
-            }
-            Start-GuiClipboardAutoClearTimer -ExpectedValue $Value
+            [System.Windows.Forms.Clipboard]::SetText($Value)
             return $true
         } catch {
             Write-Log ("GUI clipboard update failed: {0}" -f $_.Exception.Message)
@@ -2207,7 +2131,6 @@ function Set-ClipboardSafe {
     if ($null -eq $cmd) { return $false }
     try {
         Set-Clipboard -Value $Value
-        Start-ClipboardAutoClearProcess -ExpectedValue $Value
         return $true
     } catch {
         return $false
@@ -4328,11 +4251,7 @@ function Show-EntryDetail {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
                         } else {
                             if (Set-ClipboardSafe -Value $value) {
-                                if ($script:ClipboardAutoClearSeconds -gt 0) {
-                                    Show-Message ("Copied to clipboard. Clears in {0}s." -f $script:ClipboardAutoClearSeconds) ([ConsoleColor]::Green)
-                                } else {
-                                    Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
-                                }
+                                Show-Message "Copied to clipboard." ([ConsoleColor]::Green)
                             } else {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
@@ -4410,11 +4329,7 @@ function Read-OptionalSecret {
 
             $generated = New-GeneratedPassword -Length $length -IncludeSymbols:$includeSymbols
             if (Set-ClipboardSafe -Value $generated) {
-                if ($script:ClipboardAutoClearSeconds -gt 0) {
-                    Show-Message ("Generated password copied to clipboard. Clears in {0}s." -f $script:ClipboardAutoClearSeconds) ([ConsoleColor]::Green)
-                } else {
-                    Show-Message "Generated password copied to clipboard." ([ConsoleColor]::Green)
-                }
+                Show-Message "Generated password copied to clipboard." ([ConsoleColor]::Green)
             } else {
                 Show-Message "Generated password applied to the entry." ([ConsoleColor]::Green)
             }
@@ -6956,7 +6871,6 @@ function Start-VaultXGui {
     }
     $switchGuiThemeModeCommand = (Get-Command Switch-GuiThemeMode -CommandType Function).ScriptBlock
     $unregisterGuiWindowCommand = (Get-Command Unregister-GuiWindow -CommandType Function).ScriptBlock
-    $stopGuiClipboardAutoClearTimerCommand = (Get-Command Stop-GuiClipboardAutoClearTimer -CommandType Function).ScriptBlock
     $updateGuiWindowsCommand = (Get-Command Update-GuiWindows -CommandType Function).ScriptBlock
     $closeAllGuiWindowsCommand = (Get-Command Close-AllGuiWindows -CommandType Function).ScriptBlock
     $restoreConsoleWindowCommand = (Get-Command Restore-ConsoleWindow -CommandType Function).ScriptBlock
@@ -7215,7 +7129,6 @@ function Start-VaultXGui {
             if ($script:GuiLauncherForm -eq $form) {
                 $script:GuiLauncherForm = $null
             }
-            & $stopGuiClipboardAutoClearTimerCommand
             & $restoreConsoleWindowCommand | Out-Null
         }).GetNewClosure())
         $form.Add_Shown(({
@@ -7232,7 +7145,6 @@ function Start-VaultXGui {
         [void]$form.ShowDialog()
     } finally {
         $script:GuiLauncherForm = $null
-        Stop-GuiClipboardAutoClearTimer
         Restore-ConsoleWindow | Out-Null
     }
 
