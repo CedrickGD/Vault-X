@@ -115,7 +115,7 @@ try {
         $mainLnk.TargetPath = $targetExe
         $mainLnk.WorkingDirectory = $installDir
         $mainLnk.Description = "VaultX Password Manager"
-        if (Test-Path $iconFile) { $mainLnk.IconLocation = "$iconFile, 0" }
+        $mainLnk.IconLocation = "$targetExe, 0"
         $mainLnk.Save()
         Write-Host "Start Menu shortcut created." -ForegroundColor Green
     } catch {

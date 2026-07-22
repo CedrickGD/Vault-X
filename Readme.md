@@ -40,7 +40,7 @@ A local, single-user password manager built in PowerShell. Encrypted JSON vaults
 ### Installation
 - Run `VaultX.exe` directly as a portable app, or run `VaultX.ps1` from any terminal.
 - In-app option to install a Start Menu shortcut so VaultX is searchable from the Windows search bar.
-- Build your own `.exe` with the included `Build-VaultX.ps1` script (requires the `ps2exe` module).
+- Build your own `.exe` with the included `Build-VaultX.bat` script (requires the `ps2exe` module).
 
 ## Quick Start
 1. Download `VaultX.exe` (or `VaultX.ps1`) from the [latest release](https://github.com/CedrickGD/Vault-X/releases/latest).
@@ -50,11 +50,8 @@ A local, single-user password manager built in PowerShell. Encrypted JSON vaults
 
 ## Building from Source
 ```powershell
-# Install the ps2exe module (one-time)
-Install-Module ps2exe -Scope CurrentUser -Force
-
-# Compile VaultX.exe into the dist/ folder
-.\Build-VaultX.ps1
+# Compile VaultX.exe into the dist/ folder (installs ps2exe automatically if missing)
+.\Build-VaultX.bat
 ```
 The build script compiles `VaultX.ps1` into `dist/VaultX.exe` with the app icon, installs it to `%LOCALAPPDATA%\VaultX`, and creates a Start Menu shortcut.
 
@@ -62,7 +59,7 @@ The build script compiles `VaultX.ps1` into `dist/VaultX.exe` with the app icon,
 | File | Description |
 |------|-------------|
 | `VaultX.ps1` | Main script — terminal UI and local GUI |
-| `Build-VaultX.ps1` | Compiles the script into a portable `.exe` |
+| `Build-VaultX.bat` | Compiles the script into a portable `.exe` |
 | `version.yml` | Version manifest used by auto-update |
 | `assets/VaultX.ico` | Application icon |
 

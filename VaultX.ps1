@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script:AppName = "VaultX"
-$script:AppVersion = "1.0.6"
+$script:AppVersion = "1.1.0"
 $script:UpdateReleaseApiUrl = "https://api.github.com/repos/CedrickGD/Vault-X/releases/latest"
 $script:UpdateConfigUrl = "https://raw.githubusercontent.com/CedrickGD/Vault-X/main/version.yml"
 $script:UpdateCheckEnabled = ($env:VAULTX_UPDATE_CHECK -ne "0")
@@ -33,20 +33,17 @@ $script:UpdateState = [pscustomobject][ordered]@{
     StatusText = $null
 }
 $script:UpdateInstalledOnExit = $false
-$script:SkipShellOnQuit = $false
 $script:AutoUpdateEnabled = $false
 $script:MenuNormalColor = [ConsoleColor]::Gray
 $script:MenuHighlightColor = [ConsoleColor]::Cyan
 $script:MenuDisabledColor = [ConsoleColor]::DarkGray
 $script:MenuSeparatorColor = [ConsoleColor]::DarkGray
 $script:MenuPromptColor = [ConsoleColor]::Gray
-$script:MenuBannerColor = [ConsoleColor]::Cyan
 $script:MenuPointerSymbol = ">"
 $script:WaitOnExit = ($env:VAULTX_WAIT_ON_EXIT -eq "1")
 $script:DefaultGeneratedPasswordLength = 20
 $script:DefaultMenuNormalColor = $script:MenuNormalColor
 $script:DefaultMenuPromptColor = $script:MenuPromptColor
-$script:DefaultMenuBannerColor = $script:MenuBannerColor
 $script:DefaultMenuHighlightColor = $script:MenuHighlightColor
 $script:DefaultMenuSeparatorColor = $script:MenuSeparatorColor
 $script:DefaultMenuDisabledColor = $script:MenuDisabledColor
@@ -55,6 +52,10 @@ $script:GuiTheme = "dark"
 $script:FrameBufferActive = $false
 $script:FrameBufferLines = @()
 $script:LastFrameLineCount = 0
+$script:LastFrameWidth = 0
+$script:LastFrameHeight = 0
+$script:ReadKeyFailureCount = 0
+$script:ReadKeyFailureLogged = $false
 $script:GuiWindowRegistry = @()
 $script:GuiVaultSessions = @{}
 $script:GuiLauncherForm = $null
@@ -64,6 +65,10 @@ try {
     $null = [Console]::WindowWidth
     $script:HasConsole = $true
 } catch {}
+# ps2exe runs the script via AddScript with no file on disk, so $PSCommandPath
+# is empty exactly when we are the compiled VaultX.exe. $MyInvocation-based
+# signals are undefined in that context and must not be trusted.
+$script:IsCompiledExe = [string]::IsNullOrWhiteSpace($PSCommandPath)
 try {
     if ($Host -and $Host.UI -and $Host.UI.RawUI) {
         $script:DefaultHostForegroundColor = $Host.UI.RawUI.ForegroundColor
@@ -100,10 +105,19 @@ function ConvertTo-VaultSecureString {
     return $secure
 }
 
+function Remove-ControlCharacters {
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    # With TreatControlCAsInput enabled, a stray Ctrl+C (U+0003) can end up
+    # embedded in console line input; strip all control characters so secrets
+    # are never silently corrupted.
+    return (-join ($Value.ToCharArray() | Where-Object { -not [char]::IsControl($_) }))
+}
+
 function Read-SecurePlain {
     param([string]$Prompt)
     $secure = Read-Host $Prompt -AsSecureString
-    return Convert-SecureStringToPlain $secure
+    return (Remove-ControlCharacters (Convert-SecureStringToPlain $secure))
 }
 
 function Test-PathSafe {
@@ -269,7 +283,9 @@ function Wait-ForExit {
     try {
         [void](Read-Host $Prompt)
     } catch {
-        return
+        # Console input is broken; keep the window open long enough for the
+        # user to read whatever error is on screen instead of flashing away.
+        try { [void][Console]::ReadKey($true) } catch { Start-Sleep -Seconds 5 }
     }
 }
 
@@ -541,21 +557,6 @@ function Install-Update {
     }
 }
 
-function Start-UpdatedScript {
-    param([string]$ScriptPath)
-    if ([string]::IsNullOrWhiteSpace($ScriptPath)) { return }
-    if (-not (Test-Path $ScriptPath)) { return }
-    try {
-        if ($script:LaunchedFromFile -and $Host.Name -eq "ConsoleHost") {
-            Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", "`"$ScriptPath`"") | Out-Null
-        } else {
-            & $ScriptPath
-        }
-    } catch {
-        Write-Log ("Restart after update failed: {0}" -f $_.Exception.Message)
-    }
-}
-
 function Update-UpdateStatusText {
     if ($null -eq $script:UpdateState) {
         Reset-UpdateState | Out-Null
@@ -745,6 +746,11 @@ function Initialize-UpdateCheck {
     $state.ChangelogUrl = $state.ReleaseUrl
     $state.Mandatory = [bool]$info.Mandatory
     $state.CanAutoInstall = Test-UpdateDownloadUrl -Url $state.DownloadUrl
+    if ($script:IsCompiledExe) {
+        # The compiled EXE cannot overwrite itself with a downloaded .ps1;
+        # only offer manual updates via the release page.
+        $state.CanAutoInstall = $false
+    }
 
     if ($script:AutoUpdateEnabled -and $state.CanAutoInstall) {
         Set-UpdateMode -Mode "auto" -Persist:$false | Out-Null
@@ -776,6 +782,7 @@ function Initialize-UpdateCheck {
 }
 
 function Invoke-PendingUpdateOnExit {
+    if ($script:IsCompiledExe) { return $false }
     if ($null -eq $script:UpdateState -or -not $script:UpdateState.Available) { return $false }
     if ($script:UpdateState.Mode -ne "auto") { return $false }
     if (-not $script:UpdateState.CanAutoInstall) { return $false }
@@ -785,7 +792,6 @@ function Invoke-PendingUpdateOnExit {
     $updatedPath = Install-Update -DownloadUrl $script:UpdateState.DownloadUrl -LatestVersion $script:UpdateState.LatestVersion -Silent
     if (-not $updatedPath) { return $false }
 
-    $script:SkipShellOnQuit = $true
     $script:UpdateInstalledOnExit = $true
     Save-UpdateDecision -Mode $null -LatestVersion $null
     Write-Log ("VaultX updated to {0} during shutdown." -f $script:UpdateState.LatestVersion)
@@ -1008,12 +1014,13 @@ function Read-AccountName {
         Write-Header "Create vault"
         $name = Read-Host "Vault name (required, Enter to abort)"
         if ([string]::IsNullOrWhiteSpace($name)) { return $null }
+        $name = $name.Trim()
         $exists = $Accounts | Where-Object { $_.Name -ieq $name }
         if ($exists) {
-            Show-Message "Vault already exists." ([ConsoleColor]::Red)
+            Show-Message "Vault already exists." ([ConsoleColor]::Red) -PreserveInput
             continue
         }
-        return $name.Trim()
+        return $name
     }
 }
 
@@ -1407,12 +1414,14 @@ function Confirm-AccountPassword {
             $password = $null
             return $true
         } catch {
-            Show-Message "Invalid password or vault corrupted." ([ConsoleColor]::Red)
+            Show-Message "Invalid password or vault corrupted." ([ConsoleColor]::Red) -PreserveInput
             if ($recoveryAvailable) {
                 $choice = Show-ActionMenu -Title "Password check failed" -Options @("Retry", "Recovery", "Abort") -Subtitle "A recovery password is configured for this vault."
                 if ($choice -eq "Recovery") {
-                    $recoveryPassword = Read-Host "Recovery password (Enter to abort)" -AsSecureString
-                    if ($null -eq $recoveryPassword -or $recoveryPassword.Length -eq 0) { return $false }
+                    $recoveryPlain = Read-SecurePlain "Recovery password (Enter to abort)"
+                    if ([string]::IsNullOrEmpty($recoveryPlain)) { return $false }
+                    $recoveryPassword = ConvertTo-VaultSecureString $recoveryPlain
+                    $recoveryPlain = $null
                     $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
                     $recoveryPassword = $null
                     if ($null -eq $recoveryMaterial) {
@@ -1818,6 +1827,13 @@ function Test-VaultMeta {
     return $true
 }
 
+function Get-AppTitleLine {
+    if ([string]::IsNullOrWhiteSpace($script:AppVersion)) {
+        return $script:AppName
+    }
+    return ("{0} v{1}" -f $script:AppName, $script:AppVersion)
+}
+
 function Write-Banner {
     $banner = @'
 ____   _________   ____ ___.____  ___________           ____  ___
@@ -1828,10 +1844,12 @@ ____   _________   ____ ___.____  ___________           ____  ___
                 \/                 \/                         \_/
 '@
     try {
-        $lines = $banner -split "\r?\n"
-        foreach ($line in $lines) {
+        # Add the raw lines directly: Write-MenuFrame hard-truncates at the
+        # console width, so narrow windows clip the art instead of getting a
+        # "..." ellipsis stuck into it.
+        foreach ($line in ($banner -split "\r?\n")) {
             if ($line -ne "") {
-                Write-MenuTextLine -Text $line -Color $script:MenuBannerColor -NoEllipsis
+                Add-MenuFrameLine -Text $line -Color $script:MenuHighlightColor
             }
         }
     } catch {
@@ -1846,20 +1864,15 @@ function Write-Header {
     )
     $hour = (Get-Date).Hour
     $salutation = if ($hour -lt 12) { "Good morning" } elseif ($hour -lt 18) { "Good afternoon" } else { "Good evening" }
-    $greeting = "{0}, {1}." -f $salutation, $env:USERNAME
-    $hostLine = "Host: {0}@{1}" -f $env:USERNAME, $env:COMPUTERNAME
-    $titleLine = if ([string]::IsNullOrWhiteSpace($script:AppVersion)) {
-        $script:AppName
-    } else {
-        "{0} v{1}" -f $script:AppName, $script:AppVersion
-    }
-    Write-MenuTextLine -Text $greeting -Color DarkGray
-    Write-MenuTextLine -Text $hostLine -Color DarkGray
+    Write-MenuTextLine -Text ("{0}, {1}." -f $salutation, $env:USERNAME) -Color DarkGray
+    Write-MenuTextLine -Text ("Host: {0}@{1}" -f $env:USERNAME, $env:COMPUTERNAME) -Color DarkGray
     if ($ShowBanner) {
+        Write-MenuTextLine -Text ""
         Write-Banner
-        Write-MenuTextLine -Text $titleLine -Color DarkGray
+        Write-MenuTextLine -Text ""
+        Write-MenuTextLine -Text (Get-AppTitleLine) -Color DarkGray
     } else {
-        Write-MenuTextLine -Text $titleLine -Color Cyan
+        Write-MenuTextLine -Text (Get-AppTitleLine) -Color Cyan
     }
     if ($Subtitle) {
         Write-MenuTextLine -Text $Subtitle -Color Gray
@@ -1873,14 +1886,12 @@ function Write-CompactHeader {
         [switch]$ShowBanner
     )
     if ($ShowBanner) {
+        Write-MenuTextLine -Text ""
         Write-Banner
-        if ([string]::IsNullOrWhiteSpace($script:AppVersion)) {
-            Write-MenuTextLine -Text $script:AppName -Color DarkGray
-        } else {
-            Write-MenuTextLine -Text ("{0} v{1}" -f $script:AppName, $script:AppVersion) -Color DarkGray
-        }
+        Write-MenuTextLine -Text ""
+        Write-MenuTextLine -Text (Get-AppTitleLine) -Color DarkGray
     } else {
-        Write-MenuTextLine -Text $script:AppName -Color Cyan
+        Write-MenuTextLine -Text (Get-AppTitleLine) -Color Cyan
     }
     if ($Title) {
         Write-MenuTextLine -Text $Title -Color Gray
@@ -1889,36 +1900,96 @@ function Write-CompactHeader {
 }
 
 function Show-Usage {
+    $app = if ($script:IsCompiledExe) { "VaultX.exe" } else { "VaultX.ps1" }
     Write-Host ("{0} v{1}" -f $script:AppName, $script:AppVersion) -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Usage:" -ForegroundColor Gray
-    Write-Host "  VaultX.ps1             # Launch the app" -ForegroundColor Gray
-    Write-Host "  VaultX.ps1 -Gui        # Launch the local GUI" -ForegroundColor Gray
-    Write-Host "  VaultX.ps1 -Close       # Close the app session" -ForegroundColor Gray
-    Write-Host "  VaultX.ps1 -OpenData    # Open data folder" -ForegroundColor Gray
-    Write-Host "  VaultX.ps1 -Help        # Show this help" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "Session shortcuts (after first run):" -ForegroundColor Gray
-    Write-Host "  VaultX                 # Launch again in the same session" -ForegroundColor Gray
-    Write-Host "  Close-VaultX           # Close the app session" -ForegroundColor Gray
+    Write-Host ("  {0}             # Launch the app" -f $app) -ForegroundColor Gray
+    Write-Host ("  {0} -Gui        # Launch the local GUI" -f $app) -ForegroundColor Gray
+    Write-Host ("  {0} -OpenData   # Open data folder" -f $app) -ForegroundColor Gray
+    Write-Host ("  {0} -Help       # Show this help" -f $app) -ForegroundColor Gray
+    if (-not $script:IsCompiledExe) {
+        Write-Host ""
+        Write-Host "Session shortcuts (after first run):" -ForegroundColor Gray
+        Write-Host "  VaultX                 # Launch again in the same session" -ForegroundColor Gray
+        Write-Host "  Close-VaultX           # Close the app session" -ForegroundColor Gray
+    }
 }
 
 function Show-Message {
-    param([string]$Message, [ConsoleColor]$Color = [ConsoleColor]::Yellow)
-    Write-Host $Message -ForegroundColor $Color
+    param(
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Yellow,
+        [switch]$PreserveInput
+    )
+    # Writing a newline while the cursor sits on the last buffer row scrolls
+    # the whole console and makes menu frames visibly jump. Suppress the
+    # trailing newline in that case; the next frame repaints over the message.
+    $atBufferEnd = $false
+    try {
+        $atBufferEnd = ($script:HasConsole -and ([Console]::CursorTop -ge ([Console]::BufferHeight - 1)))
+    } catch {
+        $atBufferEnd = $false
+    }
+    if ($atBufferEnd) {
+        Write-Host $Message -ForegroundColor $Color -NoNewline
+    } else {
+        Write-Host $Message -ForegroundColor $Color
+    }
     Start-Sleep -Milliseconds 900
+    if (-not $PreserveInput) {
+        # Drop keys pressed during the sleep so they don't replay into the
+        # next menu (e.g. a second Enter immediately re-triggering a copy).
+        # Callers that return to a line-input prompt pass -PreserveInput so
+        # fast typists keep their type-ahead.
+        try { $Host.UI.RawUI.FlushInputBuffer() } catch {}
+        try { while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) } } catch {}
+    }
+}
+
+function Get-FrameOrigin {
+    # Frames must be painted relative to the visible window, not the buffer.
+    # Painting at buffer row 0 while the viewport sits lower (scrollback) makes
+    # the whole screen appear to jump around.
+    if (-not $script:HasConsole) { return 0 }
+    try {
+        return [Math]::Max(0, [Console]::WindowTop)
+    } catch {
+        return 0
+    }
 }
 
 function Write-MenuFrame {
     if (-not $script:FrameBufferActive) { return }
+    if (-not $script:HasConsole) {
+        # No console cursor positioning available: emit plain lines so the
+        # frame does not collapse into one concatenated string.
+        try {
+            foreach ($line in $script:FrameBufferLines) {
+                Write-Host $line.Text -ForegroundColor $line.Color
+            }
+        } finally {
+            $script:FrameBufferLines = @()
+            $script:FrameBufferActive = $false
+        }
+        return
+    }
+    $defaultColor = $null
     try {
         $width = [Math]::Max(1, (Get-ConsoleWidth))
         $height = [Math]::Max(1, (Get-ConsoleHeight))
+        if ($width -ne $script:LastFrameWidth -or $height -ne $script:LastFrameHeight) {
+            # Window was resized: stale content outside the new frame area
+            # would linger, so start from a clean screen once.
+            $script:LastFrameWidth = $width
+            $script:LastFrameHeight = $height
+            try { Clear-Host } catch {}
+        }
         $script:LastFrameLineCount = 0
         if ($null -ne $script:FrameBufferLines) {
             $script:LastFrameLineCount = $script:FrameBufferLines.Count
         }
-        Set-ConsoleCursorPosition -X 0 -Y 0
+        $origin = Get-FrameOrigin
         $defaultColor = [Console]::ForegroundColor
         for ($i = 0; $i -lt $height; $i++) {
             $lineText = ""
@@ -1934,20 +2005,20 @@ function Write-MenuFrame {
             if ($null -ne $lineColor) {
                 [Console]::ForegroundColor = $lineColor
             }
+            Set-ConsoleCursorPosition -X 0 -Y ($origin + $i)
             [Console]::Write($render)
-            if ($i -lt ($height - 1)) {
-                [Console]::Write("`r`n")
-            }
         }
-        [Console]::ForegroundColor = $defaultColor
         $targetRow = [Math]::Min([Math]::Max(0, $script:LastFrameLineCount), [Math]::Max(0, $height - 1))
-        Set-ConsoleCursorPosition -X 0 -Y $targetRow
+        Set-ConsoleCursorPosition -X 0 -Y ($origin + $targetRow)
     } catch {
         Clear-Host
         foreach ($line in $script:FrameBufferLines) {
             Write-Host $line.Text -ForegroundColor $line.Color
         }
     } finally {
+        if ($null -ne $defaultColor) {
+            try { [Console]::ForegroundColor = $defaultColor } catch {}
+        }
         $script:FrameBufferLines = @()
         $script:FrameBufferActive = $false
     }
@@ -1971,6 +2042,7 @@ function Add-MenuFrameLine {
 function Read-MenuKey {
     Write-MenuFrame
     $raw = $null
+    $readError = $null
     try {
         $raw = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         if ($raw.PSObject.Properties.Match("KeyDown").Count -gt 0 -and -not $raw.KeyDown) {
@@ -1978,17 +2050,35 @@ function Read-MenuKey {
         }
     } catch {
         $raw = $null
+        $readError = $_.Exception.Message
     }
     if ($null -eq $raw) {
         try {
             $raw = [Console]::ReadKey($true)
         } catch {
             $raw = $null
+            $readError = "{0} / {1}" -f $readError, $_.Exception.Message
         }
     }
     if ($null -eq $raw) {
-        return [pscustomobject]@{ Key = "Escape"; Modifiers = [ConsoleModifiers]0 }
+        # Both key APIs failed. Never fabricate Escape here: a broken console
+        # would emit an endless Escape stream that unwinds every menu and
+        # silently closes the app. "Unknown" is ignored by all menu loops.
+        if (-not $script:ReadKeyFailureLogged) {
+            $script:ReadKeyFailureLogged = $true
+            Write-Log ("Console key read failed in both RawUI and [Console] APIs; returning inert keys. ({0})" -f $readError)
+        }
+        $script:ReadKeyFailureCount++
+        if ($script:ReadKeyFailureCount -gt 20) {
+            # Console input is permanently unavailable (e.g. stdin redirected
+            # to NUL). Throw instead of spinning forever; the top-level
+            # handler logs it and the process exits with a visible error.
+            throw ("Console input is unavailable ({0} consecutive read failures); VaultX requires an interactive console. Last error: {1}" -f $script:ReadKeyFailureCount, $readError)
+        }
+        Start-Sleep -Milliseconds 150
+        return [pscustomobject]@{ Key = "Unknown"; Char = [char]0; Modifiers = [ConsoleModifiers]0 }
     }
+    $script:ReadKeyFailureCount = 0
     $mods = [ConsoleModifiers]0
     if ($raw.PSObject.Properties.Match("Modifiers").Count -gt 0) {
         $mods = $raw.Modifiers
@@ -2011,9 +2101,16 @@ function Read-MenuKey {
             $keyValue = $raw.Character.ToString().ToUpperInvariant()
         }
     }
+    $keyChar = [char]0
+    if ($raw.PSObject.Properties.Match("KeyChar").Count -gt 0) {
+        $keyChar = $raw.KeyChar
+    } elseif ($raw.PSObject.Properties.Match("Character").Count -gt 0) {
+        $keyChar = $raw.Character
+    }
     $keyText = if ($null -eq $keyValue -or [string]::IsNullOrEmpty($keyValue.ToString())) { "Unknown" } else { $keyValue.ToString() }
     return [pscustomobject]@{
         Key = $keyText
+        Char = $keyChar
         Modifiers = $mods
     }
 }
@@ -2024,7 +2121,9 @@ function Test-MenuKeyAvailable {
             return $Host.UI.RawUI.KeyAvailable
         }
     } catch {
-        return $false
+        # Fall through to the [Console] probe: some hosts (ps2exe) expose
+        # RawUI but throw on KeyAvailable, and returning $false here would
+        # deadlock every polling menu loop.
     }
     try {
         return [Console]::KeyAvailable
@@ -2193,31 +2292,13 @@ function Get-ConsoleHeight {
     }
 }
 
-function Write-MenuPrompt {
-    param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    Write-Host ("? " + $Text) -ForegroundColor $script:MenuPromptColor
-    Write-Host ""
-}
-
 function Write-MenuTextLine {
     param(
         [string]$Text,
-        [ConsoleColor]$Color = [ConsoleColor]::Gray,
-        [switch]$NoEllipsis
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
     )
     $width = [Math]::Max(1, (Get-ConsoleWidth))
-    if ($NoEllipsis) {
-        if ([string]::IsNullOrEmpty($Text)) {
-            $safeText = ""
-        } elseif ($Text.Length -le $width) {
-            $safeText = $Text
-        } else {
-            $safeText = $Text.Substring(0, $width)
-        }
-    } else {
-        $safeText = Format-MenuText -Text $Text -Max $width
-    }
+    $safeText = Format-MenuText -Text $Text -Max $width
     $render = $safeText.PadRight($width)
     Add-MenuFrameLine -Text $render -Color $Color
 }
@@ -2237,25 +2318,34 @@ function Write-MenuSeparator {
     Add-MenuFrameLine -Text $line -Color $script:MenuSeparatorColor
 }
 
-function Write-MenuHelpHint {
+function Write-MenuHint {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    Write-Host $Text -ForegroundColor DarkGray
+    Write-MenuTextLine -Text $Text -Color DarkGray
 }
 
-function Show-MenuHelp {
+function Move-MenuSelection {
     param(
-        [string]$Title,
-        [string[]]$Lines
+        [int]$Selected,
+        [int]$Count,
+        [int]$Delta
     )
-    Clear-Host
-    Write-Header $Title
-    foreach ($line in $Lines) {
-        Write-Host $line -ForegroundColor $script:MenuNormalColor
-    }
-    Write-Host ""
-    Write-Host "Press any key to return." -ForegroundColor DarkGray
-    [void](Read-MenuKey)
+    if ($Count -le 0) { return 0 }
+    $next = ($Selected + $Delta) % $Count
+    if ($next -lt 0) { $next += $Count }
+    return $next
+}
+
+function Test-MenuSelectKey {
+    param($Key)
+    if ($null -eq $Key) { return $false }
+    return ($Key.Key -in @("Enter", "RightArrow"))
+}
+
+function Test-MenuBackKey {
+    param($Key)
+    if ($null -eq $Key) { return $false }
+    return ($Key.Key -in @("Escape", "LeftArrow"))
 }
 
 function Get-ConsoleColorPalette {
@@ -2337,8 +2427,6 @@ function Set-FontColor {
     param([ConsoleColor]$Color)
     $script:MenuNormalColor = $Color
     $script:MenuPromptColor = $Color
-    $script:MenuBannerColor = $Color
-    $script:MenuHighlightColor = $Color
     try {
         if ($Host -and $Host.UI -and $Host.UI.RawUI) {
             $Host.UI.RawUI.ForegroundColor = $Color
@@ -2366,11 +2454,6 @@ function Set-DisabledColor {
 function Set-PromptColor {
     param([ConsoleColor]$Color)
     $script:MenuPromptColor = $Color
-}
-
-function Set-BannerColor {
-    param([ConsoleColor]$Color)
-    $script:MenuBannerColor = $Color
 }
 
 function Get-SettingsPath {
@@ -2418,7 +2501,9 @@ function Save-UiColorSettings {
     $settings | Add-Member -NotePropertyName SeparatorColor -NotePropertyValue ($script:MenuSeparatorColor.ToString()) -Force
     $settings | Add-Member -NotePropertyName DisabledColor -NotePropertyValue ($script:MenuDisabledColor.ToString()) -Force
     $settings | Add-Member -NotePropertyName PromptColor -NotePropertyValue ($script:MenuPromptColor.ToString()) -Force
-    $settings | Add-Member -NotePropertyName BannerColor -NotePropertyValue ($script:MenuBannerColor.ToString()) -Force
+    if ($settings.PSObject.Properties.Name -contains "BannerColor") {
+        $settings.PSObject.Properties.Remove("BannerColor")
+    }
     Write-Settings -Settings $settings
 }
 
@@ -2472,11 +2557,6 @@ function Initialize-Settings {
     if (-not [string]::IsNullOrWhiteSpace($promptValue)) {
         $color = Resolve-ConsoleColor -Value $promptValue
         if ($null -ne $color) { Set-PromptColor -Color $color }
-    }
-    $bannerValue = $settings.BannerColor
-    if (-not [string]::IsNullOrWhiteSpace($bannerValue)) {
-        $color = Resolve-ConsoleColor -Value $bannerValue
-        if ($null -ne $color) { Set-BannerColor -Color $color }
     }
     $guiThemeValue = $settings.GuiTheme
     if (-not [string]::IsNullOrWhiteSpace($guiThemeValue)) {
@@ -2657,7 +2737,6 @@ function Switch-GuiThemeMode {
 function Reset-CustomizationDefaults {
     $script:MenuNormalColor = $script:DefaultMenuNormalColor
     $script:MenuPromptColor = $script:DefaultMenuPromptColor
-    $script:MenuBannerColor = $script:DefaultMenuBannerColor
     $script:MenuHighlightColor = $script:DefaultMenuHighlightColor
     $script:MenuSeparatorColor = $script:DefaultMenuSeparatorColor
     $script:MenuDisabledColor = $script:DefaultMenuDisabledColor
@@ -2683,7 +2762,6 @@ function Get-UiColorSnapshot {
     return [ordered]@{
         Normal    = $script:MenuNormalColor
         Prompt    = $script:MenuPromptColor
-        Banner    = $script:MenuBannerColor
         Highlight = $script:MenuHighlightColor
         Separator = $script:MenuSeparatorColor
         Disabled  = $script:MenuDisabledColor
@@ -2696,7 +2774,6 @@ function Restore-UiColorSnapshot {
     if ($null -eq $Snapshot) { return }
     $script:MenuNormalColor = $Snapshot.Normal
     $script:MenuPromptColor = $Snapshot.Prompt
-    $script:MenuBannerColor = $Snapshot.Banner
     $script:MenuHighlightColor = $Snapshot.Highlight
     $script:MenuSeparatorColor = $Snapshot.Separator
     $script:MenuDisabledColor = $Snapshot.Disabled
@@ -2721,12 +2798,11 @@ function Invoke-ColorPreview {
         Clear-Host
         Write-CompactHeader -Title $Title
         Write-MenuRule -Char '-'
-        Write-MenuItem -Text (Format-MenuLabel -Label "Sample" -IsSelected $true) -IsSelected $true -Color $script:MenuHighlightColor -Indent 0
-        Write-MenuItem -Text (Format-MenuLabel -Label "Option" -IsSelected $false) -IsSelected $false -Color $script:MenuNormalColor -Indent 0
-        Write-MenuItem -Text (Format-MenuLabel -Label "Disabled" -IsSelected $false) -IsSelected $false -IsActive:$false -Color $script:MenuDisabledColor -Indent 0
+        Write-MenuItem -Text (Format-MenuLabel -Label "Sample") -IsSelected $true -Color $script:MenuHighlightColor -Indent 0
+        Write-MenuItem -Text (Format-MenuLabel -Label "Option") -IsSelected $false -Color $script:MenuNormalColor -Indent 0
+        Write-MenuItem -Text (Format-MenuLabel -Label "Disabled") -IsSelected $false -IsActive:$false -Color $script:MenuDisabledColor -Indent 0
         Write-Host ""
         Write-Host "Prompt text" -ForegroundColor $script:MenuPromptColor
-        Write-Host "Banner text" -ForegroundColor $script:MenuBannerColor
         Write-Host ""
         $choice = Read-Host "Apply color? (Y/N)"
         if ($choice -match '^(?i)y') {
@@ -2789,14 +2865,13 @@ function Invoke-UiColorPrompt {
 
 function Show-UiColorsMenu {
     while ($true) {
-        $choice = Show-ActionMenu -Title "Other UI colors" -Options @("Highlight", "Separator", "Disabled", "Prompt", "Banner", "Back")
+        $choice = Show-ActionMenu -Title "Customize / Other UI colors" -Options @("Highlight", "Separator", "Disabled", "Prompt", "Back")
         if ($null -eq $choice -or $choice -eq "Back") { return }
         switch ($choice) {
             "Highlight" { Invoke-UiColorPrompt -Label "Highlight" -Apply { param($c) Set-HighlightColor -Color $c } | Out-Null }
             "Separator" { Invoke-UiColorPrompt -Label "Separator" -Apply { param($c) Set-SeparatorColor -Color $c } | Out-Null }
             "Disabled" { Invoke-UiColorPrompt -Label "Disabled" -Apply { param($c) Set-DisabledColor -Color $c } | Out-Null }
             "Prompt" { Invoke-UiColorPrompt -Label "Prompt" -Apply { param($c) Set-PromptColor -Color $c } | Out-Null }
-            "Banner" { Invoke-UiColorPrompt -Label "Banner" -Apply { param($c) Set-BannerColor -Color $c } | Out-Null }
         }
     }
 }
@@ -2812,32 +2887,15 @@ function Format-MenuText {
 
 function Format-ActionLabel {
     param([string]$Label)
-    if ([string]::IsNullOrWhiteSpace($Label)) { return "[Action]" }
-    return "[Action] " + $Label
+    if ([string]::IsNullOrWhiteSpace($Label)) { return "Action" }
+    if ($Label -eq "Back") { return "Back" }
+    return ("Action: {0}" -f $Label)
 }
 
 function Format-MenuLabel {
-    param(
-        [string]$Label,
-        [bool]$IsSelected
-    )
+    param([string]$Label)
     if ([string]::IsNullOrWhiteSpace($Label)) { return "" }
-    if ($IsSelected) {
-        return ("[{0}]" -f $Label)
-    }
-    return (" {0} " -f $Label)
-}
-
-function Get-MenuBlockWidth {
-    param(
-        [string[]]$Items,
-        [int]$MinWidth = 10,
-        [int]$MaxWidth = 60
-    )
-    if ($null -eq $Items -or $Items.Count -eq 0) { return $MinWidth }
-    $maxLen = ($Items | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
-    $width = [Math]::Max($MinWidth, [Math]::Min($MaxWidth, $maxLen + 2))
-    return $width
+    return $Label
 }
 
 function Write-MenuRule {
@@ -2854,17 +2912,12 @@ function Write-MenuRule {
 function Start-MenuFrame {
     param([ref]$IsFirstRender)
     if ($IsFirstRender.Value) {
-        try {
-            Set-ConsoleCursorPosition -X 0 -Y 0
-        } catch {
-            Clear-Host
-        }
         $IsFirstRender.Value = $false
     }
     $script:FrameBufferLines = @()
     $script:FrameBufferActive = $true
     if ($script:HasConsole) {
-        Set-ConsoleCursorPosition -X 0 -Y 0
+        Set-ConsoleCursorPosition -X 0 -Y (Get-FrameOrigin)
     } else {
         Clear-Host
     }
@@ -2876,35 +2929,11 @@ function Write-MenuItem {
         [bool]$IsSelected,
         [bool]$IsActive = $true,
         [ConsoleColor]$Color = [ConsoleColor]::Gray,
-        [int]$Indent = 0,
-        [ValidateSet("Left", "Center")]
-        [string]$Align = "Left",
-        [int]$BlockWidth = 0
+        [int]$Indent = 0
     )
     $consoleWidth = [Math]::Max(10, (Get-ConsoleWidth))
     $maxWidth = [Math]::Max(10, $consoleWidth - ($Indent + 4))
     $safeText = Format-MenuText -Text $Text -Max $maxWidth
-    if ($Align -eq "Center") {
-        $prefix = if ($IsSelected -and $IsActive) { "$script:MenuPointerSymbol " } else { "  " }
-        $line = $prefix + $safeText
-        $width = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
-        $padding = [Math]::Max(0, [Math]::Floor(($width - $line.Length) / 2))
-        $render = ((" " * $padding) + $line).PadRight($width)
-        if ($Indent -gt 0) { $render = (" " * $Indent) + $render }
-        Add-MenuFrameLine -Text $render -Color $Color
-        return
-    }
-    if ($BlockWidth -gt 0) {
-        $prefix = if ($IsSelected -and $IsActive) { "$script:MenuPointerSymbol " } else { "  " }
-        $line = $prefix + $safeText
-        $width = [Math]::Max($BlockWidth, $line.Length)
-        $screenWidth = [Math]::Max(10, (Get-ConsoleWidth) - ($Indent * 2))
-        $padding = [Math]::Max(0, [Math]::Floor(($screenWidth - $width) / 2))
-        $render = ((" " * $padding) + $line).PadRight($screenWidth)
-        if ($Indent -gt 0) { $render = (" " * $Indent) + $render }
-        Add-MenuFrameLine -Text $render -Color $Color
-        return
-    }
     $prefix = if ($IsSelected -and $IsActive) { "$script:MenuPointerSymbol " } else { "  " }
     $line = $prefix + $safeText
     $renderWidth = [Math]::Max(10, $consoleWidth - $Indent)
@@ -2919,13 +2948,17 @@ function Show-ActionMenu {
         [string[]]$Options,
         [string]$Subtitle,
         [int]$Selected = 0,
-        [switch]$ShowBanner,
         [string]$Hint = "",
-        [bool]$Compact = $true
+        [bool]$Compact = $true,
+        [switch]$EscOnlyBack,
+        [switch]$ShowBanner
     )
     if ($null -eq $Options -or $Options.Count -eq 0) { return $null }
     if ($Selected -lt 0) { $Selected = 0 }
     if ($Selected -ge $Options.Count) { $Selected = $Options.Count - 1 }
+    if ([string]::IsNullOrWhiteSpace($Hint)) {
+        $Hint = "Up/Down: move | Enter/Right: select | Esc/Left: back"
+    }
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
@@ -2948,28 +2981,24 @@ function Show-ActionMenu {
                     Write-MenuRule -Char '-'
                 }
                 $isSelected = ($i -eq $Selected)
-                $line = Format-MenuLabel -Label $Options[$i] -IsSelected $isSelected
+                $line = Format-MenuLabel -Label $Options[$i]
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
                 Write-MenuItem -Text $line -IsSelected $isSelected -Color $color -Indent 0
             }
             if (-not [string]::IsNullOrWhiteSpace($Hint)) {
                 Write-MenuTextLine -Text ""
-                Write-MenuTextLine -Text $Hint -Color DarkGray
+                Write-MenuHint -Text $Hint
             }
             $key = Read-MenuKey
-            switch ($key.Key) {
-                "UpArrow" {
-                    if ($Options.Count -gt 0) {
-                        if ($Selected -gt 0) { $Selected-- } else { $Selected = $Options.Count - 1 }
-                    }
-                }
-                "DownArrow" {
-                    if ($Options.Count -gt 0) {
-                        if ($Selected -lt ($Options.Count - 1)) { $Selected++ } else { $Selected = 0 }
-                    }
-                }
-                "Enter" { return $Options[$Selected] }
-                "Escape" { return $null }
+            if ($key.Key -eq "UpArrow") {
+                $Selected = Move-MenuSelection -Selected $Selected -Count $Options.Count -Delta -1
+            } elseif ($key.Key -eq "DownArrow") {
+                $Selected = Move-MenuSelection -Selected $Selected -Count $Options.Count -Delta 1
+            } elseif (Test-MenuSelectKey -Key $key) {
+                return $Options[$Selected]
+            } elseif (Test-MenuBackKey -Key $key) {
+                if ($EscOnlyBack -and $key.Key -ne "Escape") { continue }
+                return $null
             }
         }
     } finally {
@@ -2989,7 +3018,7 @@ function Read-NewMasterPassword {
         $pw2 = Read-SecurePlain "Confirm master password (Enter to abort)"
         if ([string]::IsNullOrEmpty($pw2)) { return $null }
         if ($pw1 -ne $pw2) {
-            Show-Message "Passwords do not match." ([ConsoleColor]::Red)
+            Show-Message "Passwords do not match." ([ConsoleColor]::Red) -PreserveInput
             $pw1 = $null
             $pw2 = $null
             continue
@@ -3012,7 +3041,7 @@ function Read-ConfirmedSecret {
         $pw2 = Read-SecurePlain "$ConfirmPrompt (Enter to abort)"
         if ([string]::IsNullOrEmpty($pw2)) { return $null }
         if ($pw1 -ne $pw2) {
-            Show-Message "Passwords do not match." ([ConsoleColor]::Red)
+            Show-Message "Passwords do not match." ([ConsoleColor]::Red) -PreserveInput
             $pw1 = $null
             $pw2 = $null
             continue
@@ -3160,12 +3189,14 @@ function Open-Vault {
                 MacKey = $pair.MacKey
             }
         } catch {
-            Show-Message "Invalid password or vault corrupted." ([ConsoleColor]::Red)
+            Show-Message "Invalid password or vault corrupted." ([ConsoleColor]::Red) -PreserveInput
             if ($recoveryAvailable) {
                 $choice = Show-ActionMenu -Title "Unlock failed" -Options @("Retry", "Recovery", "Abort") -Subtitle "A recovery password is configured for this vault."
                 if ($choice -eq "Recovery") {
-                    $recoveryPassword = Read-Host "Recovery password (Enter to abort)" -AsSecureString
-                    if ($null -eq $recoveryPassword -or $recoveryPassword.Length -eq 0) { return $null }
+                    $recoveryPlain = Read-SecurePlain "Recovery password (Enter to abort)"
+                    if ([string]::IsNullOrEmpty($recoveryPlain)) { return $null }
+                    $recoveryPassword = ConvertTo-VaultSecureString $recoveryPlain
+                    $recoveryPlain = $null
                     $recoveryMaterial = Get-MasterKeyFromRecovery -Meta $meta -RecoveryPassword $recoveryPassword
                     $recoveryPassword = $null
                     if ($null -eq $recoveryMaterial) {
@@ -3232,15 +3263,15 @@ function Invoke-RecoveryOptions {
         $choice = Show-ActionMenu -Title "Recovery" -Options $options -Subtitle $subtitle
         if ($null -eq $choice -or $choice -eq "Back") { return $false }
         if ($choice -eq "Remove recovery") {
-            if (-not (Confirm-Action "Remove recovery password for this vault?")) { return $false }
+            if (-not (Confirm-Action "Remove recovery password for this vault?")) { continue }
             Remove-RecoveryFields -Meta $Meta
             Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
             Show-Message "Recovery password removed." ([ConsoleColor]::Green)
-            return $true
+            continue
         }
         $title = if ($AccountName) { "Set recovery password for vault $AccountName" } else { "Set recovery password" }
         $recoveryPassword = Read-ConfirmedSecret -Title $title -Prompt "Create recovery password" -ConfirmPrompt "Confirm recovery password"
-        if ([string]::IsNullOrEmpty($recoveryPassword)) { return $false }
+        if ([string]::IsNullOrEmpty($recoveryPassword)) { continue }
         $salt = New-RandomBytes 16
         $iterations = 100000
         $recoveryKey = Get-KeyFromPassword -Password $recoveryPassword -Salt $salt -Iterations $iterations
@@ -3253,7 +3284,7 @@ function Invoke-RecoveryOptions {
         Save-Vault -VaultPath $VaultPath -Key $Key -MacKey $MacKey -Meta $Meta -Data $Data
         $recoveryPassword = $null
         Show-Message "Recovery password saved." ([ConsoleColor]::Green)
-        return $true
+        continue
     }
 }
 
@@ -3749,18 +3780,17 @@ function Show-EntryList {
             $filtered = $filterResult.Entries
             $map = $filterResult.Map
 
+            # Item layout: 0 = Back, 1 = "+ Add Entry", entries from position 2.
             if ($syncSelection) {
-                $selectedPos = 0
+                $selectedPos = 1
                 if ($map.Count -gt 0) {
                     $found = [Array]::IndexOf($map, $SelectedIndex)
-                    if ($found -ge 0) { $selectedPos = $found + 1 } else { $selectedPos = 1 }
+                    if ($found -ge 0) { $selectedPos = $found + 2 } else { $selectedPos = 2 }
                 }
                 $syncSelection = $false
             } else {
-                if ($map.Count -eq 0) {
-                    $selectedPos = 0
-                } elseif ($selectedPos -gt $map.Count) {
-                    $selectedPos = $map.Count
+                if ($selectedPos -gt ($map.Count + 1)) {
+                    $selectedPos = $map.Count + 1
                 } elseif ($selectedPos -lt 0) {
                     $selectedPos = 0
                 }
@@ -3770,12 +3800,15 @@ function Show-EntryList {
             $subtitle = $Title
             if ($AccountName) { $subtitle = "$Title - $AccountName" }
             Write-Header $subtitle -ShowBanner
-            Write-MenuTextLine -Text ("Search: " + $SearchTerm) -Color DarkGray
+            $searchDisplay = if ([string]::IsNullOrWhiteSpace($SearchTerm)) { "(type to filter)" } else { $SearchTerm }
+            Write-MenuTextLine -Text ("Search: " + $searchDisplay) -Color DarkGray
             Write-MenuTextLine -Text "" -Color DarkGray
             Write-MenuSeparator -Indent 0
 
             $backColor = if ($selectedPos -eq 0) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-            Write-MenuItem -Text "Back" -IsSelected:($selectedPos -eq 0) -IsActive:$true -Color $backColor
+            Write-MenuItem -Text (Format-MenuLabel -Label "Back") -IsSelected:($selectedPos -eq 0) -IsActive:$true -Color $backColor
+            $addColor = if ($selectedPos -eq 1) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
+            Write-MenuItem -Text (Format-MenuLabel -Label "+ Add Entry") -IsSelected:($selectedPos -eq 1) -IsActive:$true -Color $addColor
             Write-MenuTextLine -Text "" -Color DarkGray
             if ($filtered.Count -eq 0) {
                 if ($Entries.Count -eq 0) {
@@ -3786,6 +3819,7 @@ function Show-EntryList {
             } else {
                 $footerLines = 5
                 Write-MenuTextLine -Text "Entries" -Color DarkGray
+                Write-MenuTextLine -Text ("  {0,-30} {1}" -f "Name", "URL") -Color DarkGray
                 $headerLines = 0
                 if ($script:FrameBufferActive -and $null -ne $script:FrameBufferLines) {
                     $headerLines = $script:FrameBufferLines.Count
@@ -3801,7 +3835,7 @@ function Show-EntryList {
                     if ($start -gt ($filtered.Count - $maxVisible)) {
                         $start = [Math]::Max(0, $filtered.Count - $maxVisible)
                     }
-                    $selectedEntryPos = [Math]::Max(0, $selectedPos - 1)
+                    $selectedEntryPos = [Math]::Max(0, $selectedPos - 2)
                     if ($selectedEntryPos -lt $start) { $start = $selectedEntryPos }
                     if ($selectedEntryPos -ge ($start + $maxVisible)) { $start = $selectedEntryPos - $maxVisible + 1 }
                 }
@@ -3811,7 +3845,7 @@ function Show-EntryList {
                     $titleText = Format-DisplayValue $entry.Title 28
                     $url = Format-DisplayValue $entry.Url 40
                     $line = ("{0,-30} {1}" -f $titleText, $url)
-                    $pos = $i + 1
+                    $pos = $i + 2
                     $isSelected = ($pos -eq $selectedPos)
                     $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
                     Write-MenuItem -Text $line -IsSelected $isSelected -Color $color
@@ -3825,57 +3859,57 @@ function Show-EntryList {
             }
 
             Write-MenuTextLine -Text "" -Color DarkGray
-            Write-MenuTextLine -Text "Up/Down move, Enter select, Esc back." -Color DarkGray
-            Write-MenuTextLine -Text "Type to search, Backspace delete." -Color DarkGray
+            Write-MenuHint -Text "Up/Down: move | Enter/Right: select | Esc/Left: back"
+            Write-MenuHint -Text "Type: search | Backspace: delete | Esc: clear search"
 
             $skipIndexUpdate = $false
             $key = Read-MenuKey
-            switch ($key.Key) {
-                "UpArrow" {
-                    $totalItems = $filtered.Count + 1
-                    if ($totalItems -gt 0) {
-                        if ($selectedPos -gt 0) { $selectedPos-- } else { $selectedPos = $totalItems - 1 }
-                    }
-                }
-                "DownArrow" {
-                    $totalItems = $filtered.Count + 1
-                    if ($totalItems -gt 0) {
-                        if ($selectedPos -lt ($totalItems - 1)) { $selectedPos++ } else { $selectedPos = 0 }
-                    }
-                }
-                "Enter" {
-                    if ($selectedPos -eq 0) {
-                        return @{ Action = "back"; SelectedIndex = $SelectedIndex; SearchTerm = $SearchTerm }
-                    }
-                    if ($map.Count -gt 0 -and $selectedPos -gt 0) {
-                        return @{ Action = "select"; SelectedIndex = $map[$selectedPos - 1]; SearchTerm = $SearchTerm }
-                    }
-                    Show-Message "No entries available." ([ConsoleColor]::Red)
-                }
-                "Escape" {
+            $totalItems = $filtered.Count + 2
+            if ($key.Key -eq "UpArrow") {
+                $selectedPos = Move-MenuSelection -Selected $selectedPos -Count $totalItems -Delta -1
+            } elseif ($key.Key -eq "DownArrow") {
+                $selectedPos = Move-MenuSelection -Selected $selectedPos -Count $totalItems -Delta 1
+            } elseif (Test-MenuSelectKey -Key $key) {
+                if ($selectedPos -eq 0) {
                     return @{ Action = "back"; SelectedIndex = $SelectedIndex; SearchTerm = $SearchTerm }
                 }
-                "Backspace" {
-                    if (-not [string]::IsNullOrEmpty($SearchTerm)) {
-                        $SearchTerm = $SearchTerm.Substring(0, $SearchTerm.Length - 1)
-                        $SelectedIndex = 0
-                        $syncSelection = $true
-                        $skipIndexUpdate = $true
-                    }
+                if ($selectedPos -eq 1) {
+                    return @{ Action = "add"; SelectedIndex = $SelectedIndex; SearchTerm = $SearchTerm }
                 }
-                default {
-                    if ($key.Key.Length -eq 1 -and (($key.Modifiers -band [ConsoleModifiers]::Control) -eq 0) -and (($key.Modifiers -band [ConsoleModifiers]::Alt) -eq 0)) {
-                        $SearchTerm += $key.Key
-                        $SelectedIndex = 0
-                        $syncSelection = $true
-                        $skipIndexUpdate = $true
-                    }
+                if ($map.Count -gt 0 -and $selectedPos -gt 1) {
+                    return @{ Action = "select"; SelectedIndex = $map[$selectedPos - 2]; SearchTerm = $SearchTerm }
+                }
+                Show-Message "No entries available." ([ConsoleColor]::Red)
+            } elseif (Test-MenuBackKey -Key $key) {
+                if ($key.Key -eq "Escape" -and -not [string]::IsNullOrEmpty($SearchTerm)) {
+                    # First Esc clears an active search; a second Esc leaves.
+                    $SearchTerm = ""
+                    $SelectedIndex = 0
+                    $syncSelection = $true
+                    $skipIndexUpdate = $true
+                } else {
+                    return @{ Action = "back"; SelectedIndex = $SelectedIndex; SearchTerm = $SearchTerm }
+                }
+            } elseif ($key.Key -eq "Backspace") {
+                if (-not [string]::IsNullOrEmpty($SearchTerm)) {
+                    $SearchTerm = $SearchTerm.Substring(0, $SearchTerm.Length - 1)
+                    $SelectedIndex = 0
+                    $syncSelection = $true
+                    $skipIndexUpdate = $true
+                }
+            } else {
+                $char = $key.Char
+                if ($char -and -not [char]::IsControl($char) -and (($key.Modifiers -band [ConsoleModifiers]::Control) -eq 0) -and (($key.Modifiers -band [ConsoleModifiers]::Alt) -eq 0)) {
+                    $SearchTerm += $char
+                    $SelectedIndex = 0
+                    $syncSelection = $true
+                    $skipIndexUpdate = $true
                 }
             }
 
             if ($skipIndexUpdate) { continue }
-            if ($map.Count -gt 0 -and $selectedPos -gt 0) {
-                $SelectedIndex = $map[$selectedPos - 1]
+            if ($map.Count -gt 0 -and $selectedPos -gt 1) {
+                $SelectedIndex = $map[$selectedPos - 2]
             }
         }
     } finally {
@@ -3902,29 +3936,25 @@ function Show-AccountPicker {
             for ($i = 0; $i -lt $Accounts.Count; $i++) {
                 $isSelected = ($i -eq $selected)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text (Format-MenuLabel -Label $Accounts[$i].Name -IsSelected $isSelected) -IsSelected $isSelected -Color $color -Indent 0
+                Write-MenuItem -Text (Format-MenuLabel -Label $Accounts[$i].Name) -IsSelected $isSelected -Color $color -Indent 0
             }
             $backIndex = $Accounts.Count
             $isSelected = ($selected -eq $backIndex)
             $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-            Write-MenuItem -Text (Format-MenuLabel -Label "Back" -IsSelected $isSelected) -IsSelected $isSelected -Color $color -Indent 0
+            Write-MenuItem -Text (Format-MenuLabel -Label "Back") -IsSelected $isSelected -Color $color -Indent 0
             Write-MenuTextLine -Text ""
-            Write-MenuTextLine -Text "Up/Down move, Enter select, Esc back." -Color DarkGray
+            Write-MenuHint -Text "Up/Down: move | Enter/Right: select | Esc/Left: back"
             $key = Read-MenuKey
-            switch ($key.Key) {
-                "UpArrow" {
-                    $max = $Accounts.Count
-                    if ($selected -gt 0) { $selected-- } else { $selected = $max }
-                }
-                "DownArrow" {
-                    $max = $Accounts.Count
-                    if ($selected -lt $max) { $selected++ } else { $selected = 0 }
-                }
-                "Enter" {
-                    if ($selected -eq $backIndex) { return $null }
-                    return $selected
-                }
-                "Escape" { return $null }
+            $totalItems = $Accounts.Count + 1
+            if ($key.Key -eq "UpArrow") {
+                $selected = Move-MenuSelection -Selected $selected -Count $totalItems -Delta -1
+            } elseif ($key.Key -eq "DownArrow") {
+                $selected = Move-MenuSelection -Selected $selected -Count $totalItems -Delta 1
+            } elseif (Test-MenuSelectKey -Key $key) {
+                if ($selected -eq $backIndex) { return $null }
+                return $selected
+            } elseif (Test-MenuBackKey -Key $key) {
+                return $null
             }
         }
     } finally {
@@ -3935,57 +3965,40 @@ function Show-AccountPicker {
 function Show-VaultMenu {
     param(
         [string]$AccountName,
-        [bool]$HasEntries,
-        [string]$StartSection = "main"
+        [string]$StartSection = "main",
+        [int]$StartSelected = 0
     )
     $section = if ([string]::IsNullOrWhiteSpace($StartSection)) { "main" } else { $StartSection }
     $title = "Vault"
     if ($AccountName) { $title = "Vault - $AccountName" }
+    $mainOptions = @("Entries", "Tools", "Lock Vault")
+    $mainSelected = switch ($section) {
+        "tools" { [Array]::IndexOf($mainOptions, "Tools") }
+        default { [Math]::Max(0, $StartSelected) }
+    }
     while ($true) {
         switch ($section) {
-            "entries" {
-                $entryOptions = @("View All Entries", "Back")
-                if ($HasEntries) {
-                    $entryOptions = @("View All Entries", "Edit Entry", "Delete Entry", "Back")
-                }
-                $entryChoice = Show-ActionMenu -Title "Browse Entries" -Options $entryOptions -Hint "Up/Down move, Enter select, Esc back."
-                if ($null -eq $entryChoice -or $entryChoice -eq "Back") {
+            "tools" {
+                $toolsChoice = Show-ActionMenu -Title "$title / Tools" -Options @("2FA Settings", "Recovery", "Export Vault", "Import CSV Entries", "Back")
+                if ($null -eq $toolsChoice -or $toolsChoice -eq "Back") {
                     $section = "main"
                     continue
                 }
-                switch ($entryChoice) {
-                    "View All Entries" { return @{ Action = "view"; Section = "entries" } }
-                    "Edit Entry" { return @{ Action = "edit"; Section = "entries" } }
-                    "Delete Entry" { return @{ Action = "delete"; Section = "entries" } }
-                }
-            }
-            "security" {
-                $securityChoice = Show-ActionMenu -Title "Security Tools" -Options @("2FA Settings", "Recovery", "Back") -Hint "Up/Down move, Enter select, Esc back."
-                if ($null -eq $securityChoice -or $securityChoice -eq "Back") {
-                    $section = "main"
-                    continue
-                }
-                if ($securityChoice -eq "2FA Settings") { return @{ Action = "twofactor"; Section = "security" } }
-                if ($securityChoice -eq "Recovery") { return @{ Action = "recovery"; Section = "security" } }
-            }
-            "transfer" {
-                $transferChoice = Show-ActionMenu -Title "Backup & Export" -Options @("Export Vault", "Import CSV Entries", "Back") -Hint "Up/Down move, Enter select, Esc back."
-                if ($null -eq $transferChoice -or $transferChoice -eq "Back") {
-                    $section = "main"
-                    continue
-                }
-                if ($transferChoice -eq "Export Vault") { return @{ Action = "export"; Section = "transfer" } }
-                if ($transferChoice -eq "Import CSV Entries") { return @{ Action = "import-csv"; Section = "transfer" } }
+                if ($toolsChoice -eq "2FA Settings") { return @{ Action = "twofactor"; Section = "tools"; Selected = $mainSelected } }
+                if ($toolsChoice -eq "Recovery") { return @{ Action = "recovery"; Section = "tools"; Selected = $mainSelected } }
+                if ($toolsChoice -eq "Export Vault") { return @{ Action = "export"; Section = "tools"; Selected = $mainSelected } }
+                if ($toolsChoice -eq "Import CSV Entries") { return @{ Action = "import-csv"; Section = "tools"; Selected = $mainSelected } }
             }
             default {
-                $choice = Show-ActionMenu -Title $title -Options @("Search Entries", "Add Entry", "Browse Entries", "Security Tools", "Backup & Export", "Lock Vault", "Exit App") -ShowBanner -Hint "Up/Down move, Enter select, Esc back."
-                if ($null -eq $choice -or $choice -eq "Lock Vault") { return @{ Action = "logout"; Section = "main" } }
-                if ($choice -eq "Search Entries") { return @{ Action = "view"; Section = "entries" } }
-                if ($choice -eq "Add Entry") { return @{ Action = "add"; Section = "entries" } }
-                if ($choice -eq "Browse Entries") { $section = "entries"; continue }
-                if ($choice -eq "Security Tools") { $section = "security"; continue }
-                if ($choice -eq "Backup & Export") { $section = "transfer"; continue }
-                if ($choice -eq "Exit App") { return @{ Action = "quit"; Section = "main" } }
+                $choice = Show-ActionMenu -Title $title -Options $mainOptions -Selected $mainSelected -Hint "Up/Down: move | Enter/Right: select | Esc: lock vault" -EscOnlyBack -ShowBanner
+                if ($null -eq $choice) {
+                    if (Confirm-Action "Lock vault '$AccountName'?") { return @{ Action = "logout"; Section = "main"; Selected = $mainSelected } }
+                    continue
+                }
+                $mainSelected = [Math]::Max(0, [Array]::IndexOf($mainOptions, $choice))
+                if ($choice -eq "Lock Vault") { return @{ Action = "logout"; Section = "main"; Selected = $mainSelected } }
+                if ($choice -eq "Entries") { return @{ Action = "view"; Section = "main"; Selected = $mainSelected } }
+                if ($choice -eq "Tools") { $section = "tools"; continue }
             }
         }
     }
@@ -4009,7 +4022,7 @@ function Show-CustomizeMenu {
             }
 
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
-            Write-Header "Customize Script"
+            Write-CompactHeader -Title "Script Settings / Customize"
             Write-MenuTextLine -Text ("Current font color: " + $script:MenuNormalColor) -Color DarkGray
             Write-MenuTextLine -Text ""
             Write-MenuSeparator -Indent 0
@@ -4017,35 +4030,32 @@ function Show-CustomizeMenu {
                 $action = $actions[$i]
                 $isSelected = ($i -eq $selectedAction)
                 $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                Write-MenuItem -Text (Format-MenuLabel -Label $action.Label -IsSelected $isSelected) -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
+                Write-MenuItem -Text (Format-MenuLabel -Label $action.Label) -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
             }
             Write-MenuTextLine -Text ""
-            Write-MenuTextLine -Text "Up/Down move, Enter select, Esc back." -Color DarkGray
+            Write-MenuHint -Text "Up/Down: move | Enter/Right: select | Esc/Left: back"
             $key = Read-MenuKey
-            switch ($key.Key) {
-                "UpArrow" {
-                    if ($selectedAction -gt 0) { $selectedAction-- } else { $selectedAction = $actions.Count - 1 }
+            if ($key.Key -eq "UpArrow") {
+                $selectedAction = Move-MenuSelection -Selected $selectedAction -Count $actions.Count -Delta -1
+            } elseif ($key.Key -eq "DownArrow") {
+                $selectedAction = Move-MenuSelection -Selected $selectedAction -Count $actions.Count -Delta 1
+            } elseif (Test-MenuSelectKey -Key $key) {
+                $action = $actions[$selectedAction].Action
+                if ($action -eq "font-color") {
+                    Invoke-FontColorPrompt | Out-Null
+                    $isFirstRender = $true
+                } elseif ($action -eq "ui-colors") {
+                    Show-UiColorsMenu
+                    $isFirstRender = $true
+                } elseif ($action -eq "reset") {
+                    Reset-CustomizationDefaults
+                    Show-Message "Customizations reset to script defaults." ([ConsoleColor]::Green)
+                    $isFirstRender = $true
+                } else {
+                    return "back"
                 }
-                "DownArrow" {
-                    if ($selectedAction -lt ($actions.Count - 1)) { $selectedAction++ } else { $selectedAction = 0 }
-                }
-                "Enter" {
-                    $action = $actions[$selectedAction].Action
-                    if ($action -eq "font-color") {
-                        Invoke-FontColorPrompt | Out-Null
-                        $isFirstRender = $true
-                    } elseif ($action -eq "ui-colors") {
-                        Show-UiColorsMenu
-                        $isFirstRender = $true
-                    } elseif ($action -eq "reset") {
-                        Reset-CustomizationDefaults
-                        Show-Message "Customizations reset to script defaults." ([ConsoleColor]::Green)
-                        $isFirstRender = $true
-                    } else {
-                        return "back"
-                    }
-                }
-                "Escape" { return "back" }
+            } elseif (Test-MenuBackKey -Key $key) {
+                return "back"
             }
         }
     } finally {
@@ -4074,13 +4084,15 @@ function Show-AccountMenu {
             switch ($section) {
                 "settings" {
                     $autoLabel = if ($script:AutoUpdateEnabled) { "Auto Update: ON" } else { "Auto Update: OFF" }
-                    $settingsOptions = @($autoLabel, "Add to Search Bar", "Customize", "Clear cache", "Back")
-                    $choice = Show-ActionMenu -Title "Script Settings" -Options $settingsOptions -Hint "Up/Down move, Enter select, Esc back."
+                    $settingsOptions = @("Switch to GUI", $autoLabel, "Add to Search Bar", "Customize", "Open Data Folder", "Clear cache", "Back")
+                    $choice = Show-ActionMenu -Title "Main Menu / Settings" -Options $settingsOptions
                     $isFirstRender = $true
                     if ($null -eq $choice -or $choice -eq "Back") {
                         $section = "main"
                         continue
                     }
+                    if ($choice -eq "Switch to GUI") { return @{ Action = "gui"; Section = "settings"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts } }
+                    if ($choice -eq "Open Data Folder") { return @{ Action = "open-data"; Section = "settings"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts } }
                     if ($choice -like "Auto Update:*") {
                         $newState = -not $script:AutoUpdateEnabled
                         Set-AutoUpdateSetting -Enabled $newState
@@ -4099,31 +4111,33 @@ function Show-AccountMenu {
                         Install-StartMenuShortcut
                         continue
                     }
-                    if ($choice -eq "Customize") { return @{ Action = "customize"; Section = "settings"; Selected = 0; Accounts = $menuState.Accounts } }
-                    if ($choice -eq "Clear cache") { return @{ Action = "wipe-cache"; Section = "settings"; Selected = 0; Accounts = $menuState.Accounts } }
+                    if ($choice -eq "Customize") { return @{ Action = "customize"; Section = "settings"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts } }
+                    if ($choice -eq "Clear cache") { return @{ Action = "wipe-cache"; Section = "settings"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts } }
                 }
                 "manage" {
-                    $manageOptions = @("Remove Vault", "Back")
-                    $choice = Show-ActionMenu -Title "Manage Vaults" -Options $manageOptions -Hint "Up/Down move, Enter select, Esc back."
+                    $manageOptions = @("Create New Vault", "Import Vault")
+                    if ($menuState.Accounts.Count -gt 0) { $manageOptions += "Remove Vault" }
+                    $manageOptions += "Back"
+                    $choice = Show-ActionMenu -Title "Main Menu / Manage Vaults" -Options $manageOptions
                     $isFirstRender = $true
                     if ($null -eq $choice -or $choice -eq "Back") {
                         $section = "main"
                         continue
                     }
-                    if ($choice -eq "Remove Vault") { return @{ Action = "delete"; Section = "manage"; Selected = 0; Accounts = $menuState.Accounts } }
+                    if ($choice -eq "Create New Vault") { return @{ Action = "add"; Section = "manage"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts } }
+                    if ($choice -eq "Import Vault") { return @{ Action = "import"; Section = "manage"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts } }
+                    if ($choice -eq "Remove Vault") { return @{ Action = "delete"; Section = "manage"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts } }
                 }
                 default {
                     $actions = @()
                     if ($menuState.Accounts.Count -gt 0) {
-                        $actions += @{ Label = "Open Existing"; Action = "login" }
-                    }
-                    $actions += @{ Label = "Create New"; Action = "add" }
-                    $actions += @{ Label = "Import Data"; Action = "import" }
-                    if ($menuState.Accounts.Count -gt 0) {
+                        $actions += @{ Label = "Open Vault"; Action = "login" }
                         $actions += @{ Label = "Manage Vaults"; Action = "manage" }
+                    } else {
+                        $actions += @{ Label = "Create New Vault"; Action = "add" }
+                        $actions += @{ Label = "Import Vault"; Action = "import" }
                     }
-                    $actions += @{ Label = "Switch to GUI"; Action = "gui" }
-                    $actions += @{ Label = "Script Settings"; Action = "settings" }
+                    $actions += @{ Label = "Settings"; Action = "settings" }
                     $actions += @{ Label = "Exit App"; Action = "quit" }
 
                     if ($menuState.SelectedAction -ge $actions.Count) {
@@ -4144,17 +4158,16 @@ function Show-AccountMenu {
                         $action = $actions[$i]
                         $isSelected = ($i -eq $menuState.SelectedAction)
                         $color = if ($isSelected) { $script:MenuHighlightColor } else { $script:MenuNormalColor }
-                        Write-MenuItem -Text (Format-MenuLabel -Label $action.Label -IsSelected $isSelected) -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
+                        Write-MenuItem -Text (Format-MenuLabel -Label $action.Label) -IsSelected $isSelected -IsActive:$true -Color $color -Indent 0
                     }
                     Write-MenuTextLine -Text ""
-                    Write-MenuTextLine -Text "Up/Down move, Enter select, Esc quit." -Color DarkGray
+                    Write-MenuHint -Text "Up/Down: move | Enter/Right: select | Esc: quit"
                     $key = Read-MenuKeyWithRefresh -RefreshIntervalMs 700 -OnRefresh {
                         $currentStamp = Get-VaultFilesStamp
                         if ($currentStamp -ne $menuState.VaultStamp) {
                             $menuState.VaultStamp = $currentStamp
                             Clear-VaultCache -Force -Silent | Out-Null
                             $menuState.Accounts = Sync-AccountsWithVaultFiles -Accounts @()
-                            $menuState.SelectedAction = 0
                             return $true
                         }
                         return $false
@@ -4162,29 +4175,26 @@ function Show-AccountMenu {
                         Clear-VaultCache -Force -Silent | Out-Null
                         $menuState.Accounts = Sync-AccountsWithVaultFiles -Accounts @()
                         $menuState.VaultStamp = Get-VaultFilesStamp
-                        $menuState.SelectedAction = 0
                         return $true
                     }
                     if ($null -eq $key) { continue }
-                    switch ($key.Key) {
-                        "UpArrow" {
-                            if ($menuState.SelectedAction -gt 0) { $menuState.SelectedAction-- } else { $menuState.SelectedAction = $actions.Count - 1 }
+                    if ($key.Key -eq "UpArrow") {
+                        $menuState.SelectedAction = Move-MenuSelection -Selected $menuState.SelectedAction -Count $actions.Count -Delta -1
+                    } elseif ($key.Key -eq "DownArrow") {
+                        $menuState.SelectedAction = Move-MenuSelection -Selected $menuState.SelectedAction -Count $actions.Count -Delta 1
+                    } elseif (Test-MenuSelectKey -Key $key) {
+                        $action = $actions[$menuState.SelectedAction].Action
+                        if ($action -eq "settings" -or $action -eq "manage") {
+                            $section = $action
+                            $isFirstRender = $true
+                            continue
                         }
-                        "DownArrow" {
-                            if ($menuState.SelectedAction -lt ($actions.Count - 1)) { $menuState.SelectedAction++ } else { $menuState.SelectedAction = 0 }
+                        return @{ Action = $action; Section = "main"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts }
+                    } elseif ($key.Key -eq "Escape") {
+                        if (Confirm-Action "Exit $($script:AppName)?") {
+                            return @{ Action = "quit"; Section = "main"; Selected = $menuState.SelectedAction; Accounts = $menuState.Accounts }
                         }
-                        "Enter" {
-                            $action = $actions[$menuState.SelectedAction].Action
-                            if ($action -eq "settings" -or $action -eq "manage") {
-                                $section = $action
-                                $isFirstRender = $true
-                                continue
-                            }
-                            return @{ Action = $action; Section = "main"; Selected = 0; Accounts = $menuState.Accounts }
-                        }
-                        "Escape" {
-                            return @{ Action = "quit"; Section = "main"; Selected = 0; Accounts = $menuState.Accounts }
-                        }
+                        $isFirstRender = $true
                     }
                 }
             }
@@ -4205,24 +4215,32 @@ function Show-EntryDetail {
         $items += @{ Type = "field"; Field = $field }
     }
     if (-not [string]::IsNullOrWhiteSpace($Entry.Url)) {
-        $items += @{ Type = "action"; Label = "Open Url" }
+        $items += @{ Type = "action"; Label = "Open URL"; Result = $null }
     }
-    $items += @{ Type = "action"; Label = "Back" }
+    $items += @{ Type = "action"; Label = "Edit Entry"; Result = "edit" }
+    $items += @{ Type = "action"; Label = "Delete Entry"; Result = "delete" }
+    $items += @{ Type = "action"; Label = "Back"; Result = "back" }
     $selected = 0
+    $revealSecrets = $false
     $cursorState = Get-CursorVisible
     if ($null -ne $cursorState) { Set-CursorVisible $false }
     try {
         $isFirstRender = $true
         while ($true) {
             Start-MenuFrame -IsFirstRender ([ref]$isFirstRender)
-            Write-Header ("Entry: " + $Entry.Title)
+            Write-CompactHeader -Title ("Entry / " + $Entry.Title)
             $labelWidth = 12
+            Write-MenuSeparator -Indent 0
             for ($i = 0; $i -lt $items.Count; $i++) {
                 $item = $items[$i]
                 if ($item.Type -eq "field") {
-                    $display = Format-DisplayValue $item.Field.Display 60
+                    $rawDisplay = if ($revealSecrets) { $item.Field.Value } else { $item.Field.Display }
+                    $display = Format-DisplayValue $rawDisplay 60
                     $line = ("{0,-$labelWidth} : {1}" -f $item.Field.Label, $display)
                 } else {
+                    if ($i -gt 0 -and $items[$i - 1].Type -eq "field") {
+                        Write-MenuSeparator -Indent 0
+                    }
                     $line = Format-ActionLabel -Label $item.Label
                 }
                 $isSelected = ($i -eq $selected)
@@ -4230,22 +4248,22 @@ function Show-EntryDetail {
                 Write-MenuItem -Text $line -IsSelected $isSelected -IsActive:$true -Color $color
             }
             Write-MenuTextLine -Text ""
-            Write-MenuTextLine -Text "Enter copies field or runs action, Esc back." -Color DarkGray
+            Write-MenuHint -Text "Enter/Ctrl+C on a field: copy | Space: reveal/hide | Esc/Left: back to list"
             $key = Read-MenuKey
-            switch ($key.Key) {
-                "UpArrow" {
-                    if ($items.Count -gt 0) {
-                        if ($selected -gt 0) { $selected-- } else { $selected = $items.Count - 1 }
-                    }
-                }
-                "DownArrow" {
-                    if ($items.Count -gt 0) {
-                        if ($selected -lt ($items.Count - 1)) { $selected++ } else { $selected = 0 }
-                    }
-                }
-                "Enter" {
-                    $item = $items[$selected]
-                    if ($item.Type -eq "field") {
+            $isCtrlC = ($key.Key -eq "C" -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0))
+            if ($key.Key -eq "UpArrow") {
+                $selected = Move-MenuSelection -Selected $selected -Count $items.Count -Delta -1
+            } elseif ($key.Key -eq "DownArrow") {
+                $selected = Move-MenuSelection -Selected $selected -Count $items.Count -Delta 1
+            } elseif ($key.Key -eq "Spacebar") {
+                $revealSecrets = -not $revealSecrets
+            } elseif ((Test-MenuSelectKey -Key $key) -or $isCtrlC) {
+                $item = $items[$selected]
+                if ($item.Type -eq "field") {
+                    # Only the documented keys copy a field value; RightArrow
+                    # stays inert here so navigating cannot leak a secret to
+                    # the clipboard.
+                    if ($key.Key -eq "Enter" -or $isCtrlC) {
                         $value = $item.Field.Value
                         if ([string]::IsNullOrEmpty($value)) {
                             Show-Message "Nothing to copy." ([ConsoleColor]::Yellow)
@@ -4256,18 +4274,30 @@ function Show-EntryDetail {
                                 Show-Message "Clipboard not available in this session." ([ConsoleColor]::Yellow)
                             }
                         }
-                    } elseif ($item.Label -eq "Open Url") {
-                        Open-WebUrl -Url $Entry.Url
-                    } elseif ($item.Label -eq "Back") {
-                        return "back"
                     }
+                } elseif ($isCtrlC) {
+                    # Ctrl+C on an action item does nothing; it is copy-only.
+                } elseif ($item.Label -eq "Open URL") {
+                    Open-WebUrl -Url $Entry.Url
+                } else {
+                    return $item.Result
                 }
-                "Escape" { return "back" }
+            } elseif (Test-MenuBackKey -Key $key) {
+                return "back"
             }
         }
     } finally {
         if ($null -ne $cursorState) { Set-CursorVisible $cursorState }
     }
+}
+
+# Unique object returned by the optional prompts when the user types /cancel.
+# Reference identity guarantees stored data can never collide with it.
+$script:EditCancelSentinel = New-Object object
+
+function Test-EditCancelled {
+    param($Value)
+    return ([object]::ReferenceEquals($Value, $script:EditCancelSentinel))
 }
 
 function Read-OptionalText {
@@ -4277,6 +4307,10 @@ function Read-OptionalText {
     } else {
         $value = Read-Host "$Label (blank skip)"
     }
+    # Detect the cancel sentinel on the raw input, before the blank-keeps-
+    # current fallback: a stored value that happens to be "/cancel" must
+    # never be mistaken for a cancel request.
+    if ($null -ne $value -and $value.Trim() -eq "/cancel") { return $script:EditCancelSentinel }
     if ([string]::IsNullOrEmpty($value)) { return $Current }
     if ($value -eq "-") { return "" }
     return $value.Trim()
@@ -4290,13 +4324,14 @@ function Read-OptionalSecret {
         } else {
             $secure = Read-Host "$Label (blank skip, /gen generate)" -AsSecureString
         }
-        $plain = Convert-SecureStringToPlain $secure
+        $plain = Remove-ControlCharacters (Convert-SecureStringToPlain $secure)
         $secure = $null
 
+        $trimmed = if ($null -ne $plain) { $plain.Trim() } else { "" }
+        if ($trimmed -eq "/cancel") { return $script:EditCancelSentinel }
         if ([string]::IsNullOrEmpty($plain)) { return $Current }
         if ($plain -eq "-") { return "" }
 
-        $trimmed = $plain.Trim()
         if ($trimmed.ToLowerInvariant().StartsWith("/gen")) {
             $parts = @($trimmed -split "\s+")
             $length = $script:DefaultGeneratedPasswordLength
@@ -4323,15 +4358,15 @@ function Read-OptionalSecret {
             }
 
             if ($invalid) {
-                Show-Message "Use /gen [length] [nosym]. Example: /gen 24 nosym." ([ConsoleColor]::Yellow)
+                Show-Message "Use /gen [length] [nosym]. Example: /gen 24 nosym." ([ConsoleColor]::Yellow) -PreserveInput
                 continue
             }
 
             $generated = New-GeneratedPassword -Length $length -IncludeSymbols:$includeSymbols
             if (Set-ClipboardSafe -Value $generated) {
-                Show-Message "Generated password copied to clipboard." ([ConsoleColor]::Green)
+                Show-Message "Generated password copied to clipboard." ([ConsoleColor]::Green) -PreserveInput
             } else {
-                Show-Message "Generated password applied to the entry." ([ConsoleColor]::Green)
+                Show-Message "Generated password applied to the entry." ([ConsoleColor]::Green) -PreserveInput
             }
             return $generated
         }
@@ -4349,23 +4384,34 @@ function Read-Entry {
     } else {
         Write-Header "Add new entry"
     }
+    Write-Host "Type /cancel at any prompt to discard and go back." -ForegroundColor DarkGray
+    Write-Host ""
 
     if ($isEdit) {
         $title = Read-OptionalText "Name" $Existing.Title
+        if (Test-EditCancelled $title) { return $null }
         if ([string]::IsNullOrEmpty($title)) { $title = $Existing.Title }
     } else {
         $title = Read-Host "Name (required, Enter to abort)"
         if ([string]::IsNullOrWhiteSpace($title)) { return $null }
         $title = $title.Trim()
+        if ($title -eq "/cancel") { return $null }
     }
 
     $url = Read-OptionalText "URL" ($Existing.Url)
+    if (Test-EditCancelled $url) { return $null }
     $username = Read-OptionalText "Username" ($Existing.Username)
+    if (Test-EditCancelled $username) { return $null }
     $password = Read-OptionalSecret "Password" ($Existing.Password)
+    if (Test-EditCancelled $password) { return $null }
     $phone = Read-OptionalText "Phone" ($Existing.Phone)
+    if (Test-EditCancelled $phone) { return $null }
     $email = Read-OptionalText "Email" ($Existing.Email)
+    if (Test-EditCancelled $email) { return $null }
     $notes = Read-OptionalText "Notes" ($Existing.Notes)
+    if (Test-EditCancelled $notes) { return $null }
     $other = Read-OptionalText "Other" ($Existing.Other)
+    if (Test-EditCancelled $other) { return $null }
 
     if ($isEdit) {
         $Existing.Title = $title
@@ -4413,75 +4459,57 @@ function Invoke-VaultSession {
     $selectedIndex = 0
     $searchTerm = ""
     $vaultSection = "main"
+    $vaultSelected = 0
 
     try {
         :VaultSession while ($true) {
-            $hasEntries = ($script:VaultData.Entries.Count -gt 0)
-            $menu = Show-VaultMenu -AccountName $script:VaultMeta.AccountName -HasEntries $hasEntries -StartSection $vaultSection
+            $menu = Show-VaultMenu -AccountName $script:VaultMeta.AccountName -StartSection $vaultSection -StartSelected $vaultSelected
             if ($null -eq $menu) { break }
             $vaultSection = if ($menu.Section) { $menu.Section } else { "main" }
+            if ($null -ne $menu.Selected) { $vaultSelected = $menu.Selected }
             switch ($menu.Action) {
                 "view" {
-                    $result = Show-EntryList -Entries $script:VaultData.Entries -SelectedIndex $selectedIndex -SearchTerm $searchTerm -AccountName $script:VaultMeta.AccountName -Title "Entries"
-                    if ($null -ne $result) {
+                    # List <-> detail loop: leaving the detail returns to the
+                    # list with selection and search preserved; only Back from
+                    # the list returns to the vault menu.
+                    while ($true) {
+                        $result = Show-EntryList -Entries $script:VaultData.Entries -SelectedIndex $selectedIndex -SearchTerm $searchTerm -AccountName $script:VaultMeta.AccountName -Title "Entries"
+                        if ($null -eq $result) { break }
                         $selectedIndex = $result.SelectedIndex
                         $searchTerm = $result.SearchTerm
-                        if ($result.Action -eq "select") {
-                            $entry = $script:VaultData.Entries[$selectedIndex]
-                            while ($true) {
-                                $action = Show-EntryDetail -Entry $entry
-                                if ($action -eq "edit") {
-                                    $updated = Read-Entry -Existing $entry
-                                    if ($null -ne $updated) {
-                                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
-                                        $entry = $updated
-                                    }
-                                } else {
-                                    break
-                                }
+                        if ($result.Action -eq "add") {
+                            $newEntry = Read-Entry
+                            if ($null -ne $newEntry) {
+                                $script:VaultData.Entries += $newEntry
+                                Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
+                                $selectedIndex = $script:VaultData.Entries.Count - 1
+                                # Clear an active filter so the new entry is
+                                # visible and selected when the list returns.
+                                $searchTerm = ""
                             }
+                            continue
                         }
-                    }
-                }
-                "add" {
-                    $newEntry = Read-Entry
-                    if ($null -ne $newEntry) {
-                        $script:VaultData.Entries += $newEntry
-                        Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
-                        $selectedIndex = $script:VaultData.Entries.Count - 1
-                    }
-                }
-                "edit" {
-                    if ($script:VaultData.Entries.Count -gt 0) {
-                        $result = Show-EntryList -Entries $script:VaultData.Entries -SelectedIndex $selectedIndex -SearchTerm $searchTerm -AccountName $script:VaultMeta.AccountName -Title "Select entry to edit"
-                        if ($null -ne $result) {
-                            $selectedIndex = $result.SelectedIndex
-                            $searchTerm = $result.SearchTerm
-                            if ($result.Action -eq "select") {
-                                $entry = $script:VaultData.Entries[$selectedIndex]
+                        if ($result.Action -ne "select") { break }
+                        $entry = $script:VaultData.Entries[$selectedIndex]
+                        while ($true) {
+                            $action = Show-EntryDetail -Entry $entry
+                            if ($action -eq "edit") {
                                 $updated = Read-Entry -Existing $entry
                                 if ($null -ne $updated) {
                                     Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
+                                    $entry = $updated
                                 }
-                            }
-                        }
-                    }
-                }
-                "delete" {
-                    if ($script:VaultData.Entries.Count -gt 0) {
-                        $result = Show-EntryList -Entries $script:VaultData.Entries -SelectedIndex $selectedIndex -SearchTerm $searchTerm -AccountName $script:VaultMeta.AccountName -Title "Select entry to delete"
-                        if ($null -ne $result) {
-                            $selectedIndex = $result.SelectedIndex
-                            $searchTerm = $result.SearchTerm
-                            if ($result.Action -eq "select") {
-                                $entry = $script:VaultData.Entries[$selectedIndex]
+                            } elseif ($action -eq "delete") {
                                 if (Confirm-Action "Delete '$($entry.Title)'?") {
                                     $script:VaultData.Entries = @($script:VaultData.Entries | Where-Object { $_.Id -ne $entry.Id })
                                     Save-Vault -VaultPath $VaultPath -Key $script:VaultKey -MacKey $script:VaultMacKey -Meta $script:VaultMeta -Data $script:VaultData
                                     if ($selectedIndex -ge $script:VaultData.Entries.Count) {
                                         $selectedIndex = [Math]::Max(0, $script:VaultData.Entries.Count - 1)
                                     }
+                                    break
                                 }
+                            } else {
+                                break
                             }
                         }
                     }
@@ -4504,10 +4532,6 @@ function Invoke-VaultSession {
                     Invoke-RecoveryOptions -VaultPath $VaultPath -AccountName $script:VaultMeta.AccountName -Meta $script:VaultMeta -Data $script:VaultData -Key $script:VaultKey -MacKey $script:VaultMacKey | Out-Null
                 }
                 "logout" { break VaultSession }
-                "quit" {
-                    Stop-VaultX -Message "$script:AppName closed."
-                    break VaultSession
-                }
             }
             if ($script:QuitRequested) { break }
         }
@@ -4520,6 +4544,11 @@ function Invoke-VaultSession {
 function Close-VaultX {
     param([string]$Message)
     Clear-VaultSession
+    try {
+        if ($null -ne $script:DefaultHostForegroundColor -and $Host -and $Host.UI -and $Host.UI.RawUI) {
+            $Host.UI.RawUI.ForegroundColor = $script:DefaultHostForegroundColor
+        }
+    } catch {}
     if ($Message) {
         Write-Host $Message -ForegroundColor DarkGray
     }
@@ -4527,34 +4556,8 @@ function Close-VaultX {
 
 function Stop-VaultX {
     param([string]$Message)
-    Clear-VaultSession
-    if ($Message) {
-        Write-Host $Message -ForegroundColor DarkGray
-    }
+    Close-VaultX -Message $Message
     $script:QuitRequested = $true
-}
-
-function Start-InteractiveShellOnQuit {
-    if ($script:IsDotSourced) { return }
-    if ($script:SkipShellOnQuit) { return }
-    if (-not $script:LaunchedFromFile) { return }
-    if ($Host.Name -ne "ConsoleHost") { return }
-    try {
-        & powershell.exe -NoExit
-    } catch {
-        Write-Log ("Interactive shell relaunch failed: {0}" -f $_.Exception.Message)
-    }
-}
-
-function Start-InteractiveShellAfterGui {
-    if ($script:IsDotSourced) { return }
-    if (-not $script:LaunchedFromFile) { return }
-    if ($Host.Name -ne "ConsoleHost") { return }
-    try {
-        & powershell.exe -NoExit
-    } catch {
-        Write-Log ("Interactive shell after GUI failed: {0}" -f $_.Exception.Message)
-    }
 }
 
 function Register-VaultXSession {
@@ -5085,14 +5088,15 @@ function New-GuiWindowIcon {
     if (-not (Initialize-GuiFramework)) { return $null }
 
     $mode = if ([string]::IsNullOrWhiteSpace($Theme)) { Get-GuiThemeMode } else { $Theme.Trim().ToLowerInvariant() }
-    $bodyColor = [System.Drawing.Color]::FromArgb(255, 46, 88, 142)
-    $outlineColor = [System.Drawing.Color]::FromArgb(255, 24, 28, 34)
-    $ringColor = if ($mode -eq "dark") {
-        [System.Drawing.Color]::FromArgb(255, 248, 250, 252)
+    # Matches the app icon branding: cyan padlock on dark navy.
+    $bodyColor = [System.Drawing.Color]::FromArgb(255, 64, 217, 235)
+    $outlineColor = [System.Drawing.Color]::FromArgb(255, 16, 21, 31)
+    $ringColor = $bodyColor
+    $keyholeColor = if ($mode -eq "dark") {
+        [System.Drawing.Color]::FromArgb(255, 16, 21, 31)
     } else {
         $outlineColor
     }
-    $keyholeColor = [System.Drawing.Color]::FromArgb(255, 244, 246, 248)
 
     $bitmap = New-Object System.Drawing.Bitmap 32, 32
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -6862,12 +6866,12 @@ function Start-VaultXGui {
     param([array]$Accounts)
     if (-not (Initialize-GuiFramework)) {
         Show-Message "GUI mode requires a Windows desktop session with STA PowerShell." ([ConsoleColor]::Red)
-        return @{ Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts); Quit = $false; ReturnToTerminal = $false }
+        return @{ Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts); ReturnToTerminal = $false }
     }
 
     $state = [ordered]@{
         Accounts = if ($null -eq $Accounts) { @() } else { @($Accounts) }
-        ReturnToTerminal = $false
+        TerminalRequested = $false
     }
     $switchGuiThemeModeCommand = (Get-Command Switch-GuiThemeMode -CommandType Function).ScriptBlock
     $unregisterGuiWindowCommand = (Get-Command Unregister-GuiWindow -CommandType Function).ScriptBlock
@@ -7115,13 +7119,12 @@ function Start-VaultXGui {
         })
 
         $buttons["terminal"].Add_Click({
-            $state.ReturnToTerminal = $true
+            $state.TerminalRequested = $true
             $form.Close()
         })
 
         Register-GuiWindow -Form $form -Role "launcher" -ThemeButton $themeButton
         $form.Add_FormClosing(({
-            $state.ReturnToTerminal = $true
             & $closeAllGuiWindowsCommand -ExcludeForm $form
         }).GetNewClosure())
         $form.Add_FormClosed(({
@@ -7150,15 +7153,14 @@ function Start-VaultXGui {
 
     return @{
         Accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts)
-        Quit = $false
-        ReturnToTerminal = [bool]$state.ReturnToTerminal
+        ReturnToTerminal = [bool]$state.TerminalRequested
     }
 }
 
 function Invoke-VaultX {
     Initialize-Settings
     $accounts = Get-Accounts
-    $selectedAccount = 0
+    $selectedMainAction = 0
     $menuSection = "main"
 
     try {
@@ -7167,17 +7169,16 @@ function Invoke-VaultX {
         Initialize-UpdateCheck -CurrentVersion $script:AppVersion -PromptMode Terminal | Out-Null
         while ($true) {
             $accounts = Sync-AccountsWithVaultFiles -Accounts $accounts
-            $menu = Show-AccountMenu -Accounts $accounts -Selected $selectedAccount -StartSection $menuSection
+            $menu = Show-AccountMenu -Accounts $accounts -Selected $selectedMainAction -StartSection $menuSection
             if ($null -eq $menu) { break }
             if ($null -ne $menu.Accounts) { $accounts = $menu.Accounts }
-            $selectedAccount = $menu.Selected
+            $selectedMainAction = $menu.Selected
             $menuSection = if ($menu.Section) { $menu.Section } else { "main" }
             switch ($menu.Action) {
                 "add" {
                     $created = New-Account -Accounts $accounts
                     if ($null -ne $created) {
                         $accounts = $created.Accounts
-                        $selectedAccount = $accounts.Count - 1
                         $vaultPath = Get-VaultPath -FileName $created.Account.File
                         Invoke-VaultSession -VaultPath $vaultPath -Vault $created.Vault
                     }
@@ -7186,9 +7187,7 @@ function Invoke-VaultX {
                     $chosen = Show-AccountPicker -Accounts $accounts -Title "Select vault to remove"
                     if ($null -ne $chosen) {
                         $accounts = Remove-Account -Accounts $accounts -Selected $chosen
-                        if ($selectedAccount -ge $accounts.Count) {
-                            $selectedAccount = [Math]::Max(0, $accounts.Count - 1)
-                        }
+                        $selectedMainAction = 0
                     }
                 }
                 "login" {
@@ -7206,7 +7205,7 @@ function Invoke-VaultX {
                     $result = Import-VaultData -Accounts $accounts
                     if ($null -ne $result -and $null -ne $result.Accounts) {
                         $accounts = $result.Accounts
-                        $selectedAccount = [Math]::Max(0, $accounts.Count - 1)
+                        $selectedMainAction = 0
                     }
                 }
                 "gui" {
@@ -7216,7 +7215,7 @@ function Invoke-VaultX {
                     } else {
                         $accounts = Sync-AccountsWithVaultFiles -Accounts (Get-Accounts)
                     }
-                    $selectedAccount = 0
+                    $selectedMainAction = 0
                     $menuSection = "main"
                 }
                 "open-data" {
@@ -7228,7 +7227,7 @@ function Invoke-VaultX {
                 "wipe-cache" {
                     if (Clear-VaultCache) {
                         $accounts = Sync-AccountsWithVaultFiles -Accounts @()
-                        $selectedAccount = 0
+                        $selectedMainAction = 0
                     }
                 }
                 "quit" {
@@ -7244,8 +7243,9 @@ function Invoke-VaultX {
     }
 }
 
-$script:IsDotSourced = $MyInvocation.InvocationName -eq "."
-$script:LaunchedFromFile = [string]::IsNullOrWhiteSpace($MyInvocation.Line)
+# In the compiled EXE, $MyInvocation is synthesized by ps2exe and must never
+# make the app silently no-op, so dot-source detection only applies to .ps1 runs.
+$script:IsDotSourced = (-not $script:IsCompiledExe) -and ($MyInvocation.InvocationName -eq ".")
 if ($Help) {
     Show-Usage
     return
@@ -7256,17 +7256,44 @@ if ($OpenData) {
     return
 }
 
+$guiWantsTerminal = $false
 if ($Gui) {
-    Initialize-Settings
-    Initialize-UpdateCheck -CurrentVersion $script:AppVersion | Out-Null
-    $guiResult = Start-VaultXGui -Accounts (Get-Accounts)
-    $updateInstalled = Invoke-PendingUpdateOnExit
-    if ($null -ne $guiResult -and $guiResult.Quit) {
-        Close-VaultX -Message "$script:AppName closed."
-    } elseif ($null -ne $guiResult -and $guiResult.ReturnToTerminal -and -not $updateInstalled) {
-        Start-InteractiveShellAfterGui
+    # Ctrl+C protection must cover the GUI entry path too (visible console
+    # during startup/update check, and the error-path prompt below).
+    $prevGuiTreatCtrlC = $null
+    try {
+        $prevGuiTreatCtrlC = [Console]::TreatControlCAsInput
+        [Console]::TreatControlCAsInput = $true
+    } catch {
+        $prevGuiTreatCtrlC = $null
     }
-    return
+    try {
+        Initialize-Settings
+        Initialize-UpdateCheck -CurrentVersion $script:AppVersion | Out-Null
+        $guiResult = Start-VaultXGui -Accounts (Get-Accounts)
+        if ($null -ne $guiResult -and $guiResult.ReturnToTerminal) {
+            $guiWantsTerminal = $true
+        }
+    } catch {
+        Restore-ConsoleWindow
+        Write-Log ("Unhandled GUI error: {0}" -f $_.Exception.Message)
+        Write-Log ($_.Exception | Out-String)
+        Write-Host "VaultX hit an unexpected error." -ForegroundColor Red
+        Wait-ForExit -Prompt "Press Enter to close VaultX."
+    } finally {
+        if ($null -ne $prevGuiTreatCtrlC) {
+            try { [Console]::TreatControlCAsInput = $prevGuiTreatCtrlC } catch {}
+        }
+        if (-not $guiWantsTerminal) {
+            # When falling through to the terminal UI, the terminal block's own
+            # finally handles the pending update instead.
+            try { Invoke-PendingUpdateOnExit | Out-Null } catch { Write-Log ("Update-on-exit failed: {0}" -f $_.Exception.Message) }
+        }
+    }
+    if (-not $guiWantsTerminal) {
+        Close-VaultX -Message "$script:AppName closed."
+        return
+    }
 }
 
 if (-not $script:IsDotSourced) {
@@ -7274,24 +7301,31 @@ if (-not $script:IsDotSourced) {
         Close-VaultX -Message "$script:AppName closed."
         return
     }
+    # Deliver Ctrl+C as a regular key instead of a process signal: the ps2exe
+    # host's CancelKeyPress handling races and hard-terminates the EXE with no
+    # output, which users experience as a random silent crash.
+    $prevTreatCtrlC = $null
+    try {
+        $prevTreatCtrlC = [Console]::TreatControlCAsInput
+        [Console]::TreatControlCAsInput = $true
+    } catch {
+        $prevTreatCtrlC = $null
+    }
     try {
         Invoke-VaultX
     } catch {
-        Show-Message "VaultX hit an unexpected error." ([ConsoleColor]::Red)
         Write-Log ("Unhandled error: {0}" -f $_.Exception.Message)
         Write-Log ($_.Exception | Out-String)
+        Write-Host "VaultX hit an unexpected error." -ForegroundColor Red
         Wait-ForExit -Prompt "Press Enter to close VaultX."
     } finally {
-        Invoke-PendingUpdateOnExit | Out-Null
-        Close-VaultX
+        if ($null -ne $prevTreatCtrlC) {
+            try { [Console]::TreatControlCAsInput = $prevTreatCtrlC } catch {}
+        }
+        try { Invoke-PendingUpdateOnExit | Out-Null } catch { Write-Log ("Update-on-exit failed: {0}" -f $_.Exception.Message) }
+        try { Close-VaultX } catch {}
         if ($script:WaitOnExit) {
             Wait-ForExit -Prompt "Press Enter to close VaultX."
         }
-    }
-    if ($script:QuitRequested) {
-        if (-not $script:UpdateInstalledOnExit) {
-            Start-InteractiveShellOnQuit
-        }
-        return
     }
 }
